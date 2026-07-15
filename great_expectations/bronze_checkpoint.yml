@@ -1,0 +1,13 @@
+name: bronze_checkpoint
+config_version: 1.0
+class_name: SimpleCheckpoint
+validations:
+  - batch_request:
+      datasource_name: pandas_filesystem
+      data_connector_name: default_runtime_data_connector_name
+      data_asset_name: bronze_application
+      runtime_parameters:
+        path: ../data/bronze/bronze_application
+      batch_identifiers:
+        - default_identifier
+    expectation_suite_name: bronze_application_suite

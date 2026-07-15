@@ -1,0 +1,38 @@
+# Python cache and virtual environments
+__pycache__/
+.venv/
+venv/
+env/
+homecredit__env/
+
+# Compiled Python files
+*.pyc
+
+# Secrets
+.env
+
+# Data Files
+# It is a best practice to not store large data files in Git.
+# The raw CSV files should be stored in an object store like MinIO, as planned in your architecture documents.
+data/
+sql/dev/source_data/
+source_data/
+*.csv
+*.parquet
+*.zip
+*.pkl
+*.ipynb
+
+# Log files
+log/
+*.log
+log_storage/
+
+.ipynb
+# Note on previously ignored files:
+# The following patterns were removed because they were too broad and excluded
+# critical project files:
+# - *.md (documentation files like those in analyze_governance/)
+# - *.yaml (configuration files for Prefect, Great Expectations)
+# - *.txt (dependency files like requirements.txt)
+# If specific files of these types need to be ignored, they should be listed explicitly.
