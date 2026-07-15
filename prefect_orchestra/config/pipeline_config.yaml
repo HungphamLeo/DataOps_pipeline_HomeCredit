@@ -1,0 +1,64 @@
+paths:
+  raw_data_dir: "sql/dev/source_data"
+  output_bronze_dir: "data/bronze"
+  output_staging_dir: "data/staging"
+  output_mart_dir: "data/mart"
+  ge_root_dir: "great_expectations"
+  log_dir: "log"
+
+sources:
+  - name: "application"
+    file: "HC_application_train.csv"
+  - name: "bureau"
+    file: "HC_bureau.csv"
+  - name: "bureau_balance"
+    file: "HC_bureau_balance.csv"
+  - name: "previous_application"
+    file: "HC_previous_application.csv"
+  - name: "installments_payments"
+    file: "HC_installments_payments.csv"
+  - name: "pos_cash_balance"
+    file: "HC_POS_CASH_balance.csv"
+  - name: "credit_card_balance"
+    file: "HC_credit_card_balance.csv"
+
+prefect:
+  schedule: "0 1 * * *"
+  task_retries: 2
+  task_retry_delay_seconds: 30
+
+ge:
+  bronze_checkpoint: "bronze_checkpoint"
+  staging_checkpoint: "staging_checkpoint"
+  mart_checkpoint: "mart_checkpoint"
+
+# -------------------------------------------------------------------
+# PostgreSQL connection (used by Spark JDBC for Mart layer write)
+# -------------------------------------------------------------------
+postgres:
+  host: "localhost"
+  port: 5432
+  dbname: "homecredit_mart"
+  schema: "mart"
+  user: "${POSTGRES_USER}"
+  password: "${POSTGRES_PASSWORD}"
+
+# -------------------------------------------------------------------
+# MinIO / S3A object storage (used by Spark for Bronze & Staging)
+# -------------------------------------------------------------------
+minio:
+  endpoint_url: "http://localhost:9000"
+  access_key: "${MINIO_ROOT_USER}"
+  secret_key: "${MINIO_ROOT_PASSWORD}"
+  bucket: "lakehouse"
+  bronze_path: "bronze"
+  staging_path: "staging"
+
+# -------------------------------------------------------------------
+# Spark configuration (local mode + Delta Lake)
+# -------------------------------------------------------------------
+spark:
+  app_name: "HomeCredit-DataOps"
+  master: "local[*]"
+  jars_packages: "io.delta:delta-core_2.12:2.4.0,org.apache.hadoop:hadoop-aws:3.3.4,org.postgresql:postgresql:42.6.0"
+  sql_extensions: "io.delta.sql.DeltaSparkSessionExtension"

@@ -1,0 +1,45 @@
+{
+  "expectation_suite_name": "mart_risk_model_features_suite",
+  "ge_cloud_id": null,
+  "expectations": [
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_to_exist",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "TARGET" },
+      "expectation_type": "expect_column_to_exist",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_values_to_be_unique",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "BUREAU_AVG_BAD_STATUS_RATE", "min_value": 0, "max_value": 1, "mostly": 0.99 },
+      "expectation_type": "expect_column_values_to_be_between",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "INSTALMENT_LATE_RATE", "min_value": 0, "max_value": 1, "mostly": 0.99 },
+      "expectation_type": "expect_column_values_to_be_between",
+      "meta": {}
+    },
+    {
+      "kwargs": { "min_value": 100000 },
+      "expectation_type": "expect_table_row_count_to_be_greater_than",
+      "meta": {}
+    }
+  ],
+  "data_asset_type": "Dataset",
+  "meta": {
+    "great_expectations_version": "1.18.0"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "expectation_suite_name": "stg_application_suite",
+  "ge_cloud_id": null,
+  "expectations": [
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_to_exist",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "AGE_YEARS" },
+      "expectation_type": "expect_column_to_exist",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "INCOME_CREDIT_RATIO" },
+      "expectation_type": "expect_column_to_exist",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "AGE_YEARS" },
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "SK_ID_CURR" },
+      "expectation_type": "expect_column_values_to_be_unique",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "AGE_YEARS", "min_value": 18, "max_value": 100 },
+      "expectation_type": "expect_column_values_to_be_between",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "INCOME_CREDIT_RATIO", "min_value": 0, "max_value": 100 },
+      "expectation_type": "expect_column_values_to_be_between",
+      "meta": {}
+    },
+    {
+      "kwargs": { "column": "ANNUITY_INCOME_RATIO", "min_value": 0, "max_value": 1, "mostly": 0.99 },
+      "expectation_type": "expect_column_values_to_be_between",
+      "meta": {}
+    }
+  ],
+  "data_asset_type": "Dataset",
+  "meta": {
+    "great_expectations_version": "1.18.0"
+  }
+}

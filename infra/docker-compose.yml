@@ -8,10 +8,11 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-admin}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-admin123}
       - POSTGRES_DB=${POSTGRES_DB:-homecredit_mart}
     volumes:
-      - ../sql/ddl:/docker-entrypoint-initdb.d
+      # Mount DDL scripts so PostgreSQL auto-runs them on first start
+      - ../sql/dev/set_up_table:/docker-entrypoint-initdb.d
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-homecredit_mart}"]
@@ -27,7 +28,7 @@ services:
       - "9001:9001"
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin123}
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -36,6 +37,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # minio-init: tạo bucket "lakehouse" ngay sau khi MinIO sẵn sàng
+  minio-init:
+    image: minio/mc:latest
+    container_name: homecredit_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin123};
+        mc mb --ignore-existing local/lakehouse;
+        mc mb --ignore-existing local/lakehouse/bronze;
+        mc mb --ignore-existing local/lakehouse/staging;
+        echo 'MinIO bucket lakehouse khởi tạo thành công.';
+      "
 
 volumes:
   postgres_data:
