@@ -36,7 +36,7 @@ ge:
 # PostgreSQL connection (used by Spark JDBC for Mart layer write)
 # -------------------------------------------------------------------
 postgres:
-  host: "localhost"
+  host: "postgres"
   port: 5432
   dbname: "homecredit_mart"
   schema: "mart"
@@ -47,7 +47,7 @@ postgres:
 # MinIO / S3A object storage (used by Spark for Bronze & Staging)
 # -------------------------------------------------------------------
 minio:
-  endpoint_url: "http://localhost:9000"
+  endpoint_url: "http://minio:9000"
   access_key: "${MINIO_ROOT_USER}"
   secret_key: "${MINIO_ROOT_PASSWORD}"
   bucket: "lakehouse"

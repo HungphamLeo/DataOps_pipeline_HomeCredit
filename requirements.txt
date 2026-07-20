@@ -50,4 +50,4 @@ statsmodels==0.14.6
 
 seaborn==0.13.2
 matplotlib==3.10.3
-
+griffe==1.15.0
