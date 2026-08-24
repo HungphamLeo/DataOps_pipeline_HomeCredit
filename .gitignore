@@ -1,0 +1,15 @@
+homecredit__env/
+*.venv/
+env/
+*.yaml
+*.json
+*.sh
+.env
+*.log
+*.pyc
+*.csv
+*.yml
+*.png
+*.txt
+*.ipynb
+__pycache__/

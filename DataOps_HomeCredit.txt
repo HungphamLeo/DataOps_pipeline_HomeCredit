@@ -1,0 +1,400 @@
+Xây dựng DataOps Pipeline thực tế với SQL, Airflow và Great Expectations
+Bài này mình sẽ chia sẻ hướng dẫn hands-on: xây dựng một DataOps pipeline có CI/CD, testing, và monitoring. Không fancy, không over-engineer nhưng vừa đủ để chạy production ổn định. (Nó chỉ là 1 cách xây dựng, có thể chưa phải là tối ưu nhất)
+Stack mình chọn (ưu tiên free)
+SQL scripts: Transformation layer - MERGE/upsert, partition overwrite, idempotent writes
+Airflow: Orchestration - schedule, retry, dependency management
+Great Expectations: Data quality validation - schema, null, distribution checks
+GitHub Actions: CI/CD - lint, test, deploy tự động
+Slack: Alerting - thông báo khi pipeline fail hoặc data quality vi phạm
+Tại sao stack này? Vì đây là combo phổ biến, open-source, và community lớn. Quan trọng hơn, SQL + Airflow là nền tảng mà hầu hết Data team đều đã quen thuộc - không cần học thêm framework mới. Bạn có thể thay thế từng phần (Prefect thay Airflow, Soda thay Great Expectations) - cốt lõi là nắm được các thành phần core xử lý như thế nào.
+Scenario
+Team bạn có Data Pipeline: - Ingest raw data từ PostgreSQL source vào BigQuery - Transform raw data thành dimension và fact tables bằng SQL scripts - Serve data cho business user team
+Yêu cầu DataOps: mỗi thay đổi phải được test, deploy tự động, và monitor sau khi chạy.
+alt text
+Bước 1: Cấu trúc project
+data-pipeline/
+├── sql/
+│ ├── staging/
+│ │ ├── stg_orders.sql
+│ │ └── stg_customers.sql
+│ ├── marts/
+│ │ ├── dim_customers.sql
+│ │ └── fact_orders.sql
+│ └── tests/
+│ ├── assert_revenue_positive.sql
+│ └── assert_no_duplicate_orders.sql
+├── airflow/
+│ └── dags/
+│ └── daily_pipeline.py
+├── great_expectations/
+│ └── expectations/
+│ └── orders_suite.json
+├── .github/
+│ └── workflows/
+│ └── ci.yml
+├── scripts/
+│ └── check_downstream_impact.py
+└── README.md
+Cấu trúc đơn giản: SQL scripts tách theo layer (staging → marts), Airflow lo orchestration, Great Expectations lo validation, GitHub Actions lo CI/CD.
+Bước 2: SQL Transformation - Idempotent & Reliable
+Nguyên tắc quan trọng nhất khi viết SQL cho pipeline production: chạy lại bao nhiêu lần cũng cho kết quả giống nhau (idempotent). Không bao giờ để xảy ra tình huống chạy lại mà nhân đôi dữ liệu.
+Staging layer - Partition overwrite (không mất data cũ)
+-- sql/staging/stg_orders.sql
+-- Strategy: DELETE + INSERT theo partition date - chạy lại không nhân đôi
+-- Chỉ overwrite partition của ngày đang xử lý, giữ nguyên data các ngày khác
+-- Airflow sẽ truyền execution_date vào parameter
+
+BEGIN TRANSACTION;
+
+DELETE FROM `project.staging.stg_orders`
+WHERE DATE(order_date) = @execution_date;
+
+INSERT INTO `project.staging.stg_orders`
+(order_id, customer_id, order_date, total_revenue, status, _loaded_at)
+SELECT
+order_id,
+customer_id,
+order_date,
+total_amount AS total_revenue,
+status,
+CURRENT_TIMESTAMP() AS _loaded_at
+FROM `project.raw.orders`
+WHERE DATE(order_date) = @execution_date;
+
+COMMIT TRANSACTION;
+Lưu ý: Không dùng CREATE OR REPLACE TABLE ở đây vì nó sẽ drop toàn bộ table (mất hết data ngày cũ). Pattern DELETE + INSERT theo partition giữ data an toàn và vẫn idempotent.
+Marts layer - MERGE/Upsert cho dimension table
+-- sql/marts/dim_customers.sql
+-- Strategy: MERGE - update nếu đã tồn tại, insert nếu mới
+-- Đảm bảo idempotent: chạy lại không tạo duplicate
+
+MERGE `project.marts.dim_customers` AS target
+USING (
+SELECT
+customer_id,
+name,
+email,
+phone,
+created_at,
+CURRENT_TIMESTAMP() AS _updated_at
+FROM `project.staging.stg_customers`
+) AS source
+ON target.customer_id = source.customer_id
+WHEN MATCHED THEN
+UPDATE SET
+target.name = source.name,
+target.email = source.email,
+target.phone = source.phone,
+target._updated_at = source._updated_at
+WHEN NOT MATCHED THEN
+INSERT (customer_id, name, email, phone, created_at, _updated_at)
+VALUES (source.customer_id, source.name, source.email, source.phone, source.created_at, source._updated_at);
+Fact table - Partition overwrite an toàn
+-- sql/marts/fact_orders.sql
+-- Strategy: DELETE + INSERT theo partition - atomic & idempotent
+-- Wrap trong transaction để đảm bảo không mất dữ liệu nếu fail giữa chừng
+
+BEGIN TRANSACTION;
+
+DELETE FROM `project.marts.fact_orders`
+WHERE DATE(order_date) = @execution_date;
+
+INSERT INTO `project.marts.fact_orders`
+SELECT
+o.order_id,
+o.customer_id,
+o.order_date,
+o.total_revenue,
+o.status,
+c.name AS customer_name,
+c.email AS customer_email,
+CURRENT_TIMESTAMP() AS _loaded_at
+FROM `project.staging.stg_orders` o
+LEFT JOIN `project.marts.dim_customers` c
+ON o.customer_id = c.customer_id
+WHERE DATE(o.order_date) = @execution_date;
+
+COMMIT TRANSACTION;
+SQL Tests - Assertions đơn giản nhưng hiệu quả
+-- sql/tests/assert_revenue_positive.sql
+-- Test: tất cả revenue phải >= 0
+-- Nếu query trả về rows > 0 → test FAIL
+
+SELECT order_id, total_revenue
+FROM `project.marts.fact_orders`
+WHERE total_revenue < 0;
+-- sql/tests/assert_no_duplicate_orders.sql
+-- Test: không có duplicate order_id trong fact table
+
+SELECT order_id, COUNT(*) AS cnt
+FROM `project.marts.fact_orders`
+GROUP BY order_id
+HAVING cnt > 1;
+Bước 3: Great Expectations - Validation nâng cao
+SQL tests tốt cho basic checks (null, duplicate, business logic đơn giản). Great Expectations mạnh hơn cho statistical validation - phát hiện anomaly mà SQL khó bắt được.
+# great_expectations/validate_orders.py
+import great_expectations as gx
+
+context = gx.get_context()
+
+# Tạo expectation suite
+suite = context.add_expectation_suite("orders_suite")
+
+# Row count không drop quá 30% so với historical average
+suite.add_expectation(
+gx.expectations.ExpectTableRowCountToBeBetween(
+min_value=7000, # Based on historical minimum
+max_value=15000
+)
+)
+
+# NULL rate cho critical columns phải dưới 1%
+suite.add_expectation(
+gx.expectations.ExpectColumnValuesToNotBeNull(
+column="customer_id",
+mostly=0.99 # Cho phép tối đa 1% NULL
+)
+)
+
+# Revenue distribution không shift quá nhiều
+suite.add_expectation(
+gx.expectations.ExpectColumnMeanToBeBetween(
+column="total_revenue",
+min_value=50,
+max_value=200 # Based on historical range
+)
+)
+
+# Order date phải trong range hợp lý
+suite.add_expectation(
+gx.expectations.ExpectColumnValuesToBeBetween(
+column="order_date",
+min_value="2020-01-01",
+max_value="2026-12-31"
+)
+)
+Bước 4: Airflow DAG - Orchestration với error handling
+# airflow/dags/daily_pipeline.py
+from airflow import DAG
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.operators.python import PythonOperator
+from airflow.utils.dates import days_ago
+from datetime import timedelta
+import os
+
+SQL_DIR = '/opt/sql'
+
+default_args = {
+'owner': 'data-team',
+'retries': 2,
+'retry_delay': timedelta(minutes=5),
+'on_failure_callback': slack_alert,
+}
+dag = DAG(
+'daily_data_pipeline',
+default_args=default_args,
+schedule_interval='0 6 * * *', # Chạy 6h sáng mỗi ngày
+start_date=days_ago(1),
+catchup=False,
+template_searchpath=[SQL_DIR], # Cho phép Airflow tìm SQL files
+)
+def read_sql_file(file_path):
+"""Đọc SQL file tại runtime (không phải parse time)."""
+with open(os.path.join(SQL_DIR, file_path), 'r') as f:
+return f.read()
+# --- STAGING LAYER ---
+load_stg_orders = BigQueryInsertJobOperator(
+task_id='load_stg_orders',
+configuration={
+"query": {
+"query": "{% include 'staging/stg_orders.sql' %}",
+"useLegacySql": False,
+"queryParameters": [{
+"name": "execution_date",
+"parameterType": {"type": "DATE"},
+"parameterValue": {"value": "{{ ds }}"}
+}]
+}
+},
+dag=dag,
+)
+
+load_stg_customers = BigQueryInsertJobOperator(
+task_id='load_stg_customers',
+configuration={
+"query": {
+"query": "{% include 'staging/stg_customers.sql' %}",
+"useLegacySql": False,
+}
+},
+dag=dag,
+)
+
+# --- MARTS LAYER ---
+
+build_dim_customers = BigQueryInsertJobOperator(
+task_id='build_dim_customers',
+configuration={
+"query": {
+"query": "{% include 'marts/dim_customers.sql' %}",
+"useLegacySql": False,
+}
+},
+dag=dag,
+)
+
+build_fact_orders = BigQueryInsertJobOperator(
+task_id='build_fact_orders',
+configuration={
+"query": {
+"query": "{% include 'marts/fact_orders.sql' %}",
+"useLegacySql": False,
+"queryParameters": [{
+"name": "execution_date",
+"parameterType": {"type": "DATE"},
+"parameterValue": {"value": "{{ ds }}"}
+}]
+}
+},
+dag=dag,
+)
+
+# --- SQL TESTS ---
+
+def run_sql_test(sql_file, **context):
+"""Chạy SQL test - nếu query trả về rows thì raise error."""
+from google.cloud import bigquery
+client = bigquery.Client()
+query = read_sql_file(f'tests/{sql_file}')
+result = client.query(query).result()
+rows = list(result)
+if len(rows) > 0:
+raise ValueError(
+f"SQL test FAILED: {sql_file} - "
+f"Found {len(rows)} violating rows. "
+f"Sample: {rows[:5]}"
+)
+
+test_revenue = PythonOperator(
+task_id='test_revenue_positive',
+python_callable=run_sql_test,
+op_kwargs={'sql_file': 'assert_revenue_positive.sql'},
+dag=dag,
+)
+
+test_duplicates = PythonOperator(
+task_id='test_no_duplicate_orders',
+python_callable=run_sql_test,
+op_kwargs={'sql_file': 'assert_no_duplicate_orders.sql'},
+dag=dag,
+)
+
+# --- GREAT EXPECTATIONS VALIDATION ---
+
+validate_ge = PythonOperator(
+task_id='validate_great_expectations',
+python_callable=run_ge_validation,
+dag=dag,
+)
+
+# --- NOTIFY ---
+
+notify = PythonOperator(
+task_id='notify_success',
+python_callable=slack_success_notification,
+dag=dag,
+)
+
+# --- DEPENDENCY ---
+# Staging chạy song song → Marts theo thứ tự → Tests → GE → Notify
+
+[load_stg_orders, load_stg_customers] >> build_dim_customers >> build_fact_orders
+build_fact_orders >> [test_revenue, test_duplicates] >> validate_ge >> notify
+# Slack alert function
+def slack_alert(context):
+task_instance = context['task_instance']
+message = f"""
+:red_circle: Pipeline Failed
+Task: {task_instance.task_id}
+DAG: {task_instance.dag_id}
+Execution Time: {context['execution_date']}
+Log: {task_instance.log_url}
+Runbook: https://wiki.internal/runbooks/{task_instance.task_id}
+"""
+send_slack_message(channel="#data-alerts", text=message)
+Bước 5: GitHub Actions CI/CD
+# .github/workflows/ci.yml
+name: Data Pipeline CI
+
+on:
+pull_request:
+paths:
+- 'sql/**'
+- 'great_expectations/**'
+- 'airflow/**'
+
+jobs:
+lint-and-test:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v3
+
+- name: Setup Python
+uses: actions/setup-python@v4
+with:
+python-version: '3.10'
+
+- name: Install dependencies
+run: |
+pip install sqlfluff great-expectations apache-airflow
+
+- name: SQL Lint (sqlfluff)
+run: |
+sqlfluff lint sql/ --dialect bigquery
+
+- name: Validate SQL syntax (dry-run)
+run: |
+python scripts/validate_sql_syntax.py sql/
+
+- name: Validate Airflow DAGs (import check)
+run: |
+python -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('dag', 'airflow/dags/daily_pipeline.py')
+mod = importlib.util.module_from_spec(spec)
+try:
+spec.loader.exec_module(mod)
+except Exception as e:
+print(f'DAG validation failed: {e}')
+sys.exit(1)
+print('DAG validation passed')
+"
+
+- name: Validate GE expectations (schema check)
+run: python great_expectations/validate_schema.py
+
+- name: Check for downstream impact
+run: |
+python scripts/check_downstream_impact.py \
+--changed-files $(git diff --name-only origin/main -- 'sql/**')
+Kết quả: Flow hoàn chỉnh
+Developer thay đổi SQL
+→ Push code, tạo PR
+→ GitHub Actions tự động lint SQL + validate DAG
+→ Team review + approve
+→ Merge vào main
+→ Airflow pick up thay đổi trong lần chạy tiếp theo
+→ Pipeline chạy:
+Staging (parallel) → Marts (sequential) → SQL Tests → GE Validation
+→ Nếu pass: Slack notify success
+→ Nếu fail: Slack alert + runbook link
+Toàn bộ flow này sau khi setup xong, mỗi ngày team không cần làm gì manual. Chỉ can thiệp khi có alert.
+Lưu ý thực tế
+Đừng setup tất cả cùng lúc. Tuần 1: git + SQL tests cơ bản. Tuần 2: CI/CD với sqlfluff. Tuần 3: Great Expectations. Tuần 4: monitoring + alerting.
+Start small: Test 1-2 tables quan trọng nhất trước, rồi mở rộng dần.
+Idempotent là bắt buộc: Mọi SQL script phải chạy lại được mà không sai dữ liệu. MERGE và DELETE+INSERT là hai pattern phổ biến nhất.
+Alert fatigue là thật: Chỉ alert những gì actionable. Đừng alert mọi thứ rồi team ignore hết.
+Document mọi thứ: Runbook cho từng loại failure. On-call rotation nếu team đủ lớn.
+Kết luận
+DataOps không cần framework phức tạp hay tool đắt tiền. Với SQL thuần + Airflow + Great Expectations + GitHub Actions (tất cả free/open-source), bạn đã có một DataOps pipeline hoàn chỉnh chạy production được.
+Quan trọng nhất không phải tool, mà là mindset: mọi thay đổi phải được test, mọi failure phải được phát hiện nhanh, mọi SQL phải idempotent, và mọi process phải reproducible.
