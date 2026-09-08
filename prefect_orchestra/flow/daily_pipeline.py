@@ -1,3 +1,10 @@
+"""
+Master Pipeline Flow — điều phối toàn bộ pipeline DataOps:
+Bronze Ingest → Staging Transform → Mart Build
+
+Entry point: python cli/main.py
+"""
+import time
 from pathlib import Path
 from prefect import flow
 
@@ -13,38 +20,57 @@ BASE_DIR = Path(__file__).resolve().parents[2]
     log_prints=True,
     description=(
         "Master flow điều phối toàn bộ pipeline DataOps: "
-        "Bronze -> Staging -> Mart, bao gồm kiểm tra chất lượng dữ liệu GE ở mỗi tầng."
+        "Bronze → Staging → Mart, bao gồm kiểm tra chất lượng dữ liệu GE ở mỗi tầng."
     ),
 )
 def master_pipeline_flow():
     """
     Master flow điều phối toàn bộ pipeline DataOps:
-    1. Tầng Bronze: Ingest dữ liệu thô và kiểm tra chất lượng.
-    2. Tầng Staging: Transform, aggregate dữ liệu và kiểm tra chất lượng.
-    3. Tầng Mart: Xây dựng các data mart cuối cùng và kiểm tra chất lượng.
+    1. Bronze: Ingest CSV thô → Parquet, phân vùng theo _load_date.
+    2. Staging: Transform, aggregate Bronze → 6 staging tables.
+    3. Mart: Join Staging → 3 mart tables (ML features, report, default cohort).
     """
-    print("--- Bắt đầu Master Pipeline Flow ---")
+    start_ts = time.time()
+    print("=" * 60)
+    print("=== MASTER PIPELINE: BẮT ĐẦU ===")
+    print("=" * 60)
 
-    print("Kích hoạt Bronze Ingest Flow...")
+    # 1 — Bronze
+    print("\n[1/3] Kích hoạt Bronze Ingest Flow...")
     bronze_ingest_flow()
-    print("Bronze Ingest Flow đã hoàn thành.")
+    print("[1/3] ✓ Bronze Ingest Flow hoàn thành.")
 
-    print("Kích hoạt Staging Transform Flow...")
+    # 2 — Staging
+    print("\n[2/3] Kích hoạt Staging Transform Flow...")
     staging_transform_flow()
-    print("Staging Transform Flow đã hoàn thành.")
+    print("[2/3] ✓ Staging Transform Flow hoàn thành.")
 
-    print("Kích hoạt Mart Build Flow...")
+    # 3 — Mart
+    print("\n[3/3] Kích hoạt Mart Build Flow...")
     mart_build_flow()
-    print("Mart Build Flow đã hoàn thành.")
+    print("[3/3] ✓ Mart Build Flow hoàn thành.")
 
-    print("--- Master Pipeline Flow đã kết thúc. ---")
+    elapsed = time.time() - start_ts
+    print("\n" + "=" * 60)
+    print(f"=== MASTER PIPELINE: HOÀN THÀNH — {elapsed:.1f}s ===")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    # Chạy pipeline một lần ngay lập tức
+    # Chạy pipeline một lần ngay lập tức để test
     master_pipeline_flow()
 
-    # Để schedule pipeline (1 AM daily), dùng Prefect CLI:
-    # prefect deploy --name "home-credit-daily" \
-    #   --flow prefect_orchestra/flow/daily_pipeline.py:master_pipeline_flow \
-    #   --cron "0 1 * * *" --timezone "UTC"
+    # --- Scheduling ---
+    # Để schedule pipeline chạy lúc 1 giờ sáng hàng ngày, deploy với Prefect CLI:
+    #
+    #   prefect deploy \
+    #     --name "home-credit-daily" \
+    #     --flow prefect_orchestra/flow/daily_pipeline.py:master_pipeline_flow \
+    #     --cron "0 1 * * *" \
+    #     --timezone "UTC"
+    #
+    # Hoặc dùng .serve() cho local agent (không recommended cho production):
+    #   master_pipeline_flow.serve(
+    #       name="home-credit-daily-deployment",
+    #       cron="0 1 * * *",
+    #   )
