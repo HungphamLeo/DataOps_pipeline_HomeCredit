@@ -1,14 +1,26 @@
+"""
+Mart Build Flow — Staging → Mart Layer
+
+Đọc dữ liệu từ tầng Staging, join thành các bảng analytical,
+và lưu kết quả vào tầng Mart.
+"""
 import pandas as pd
 import numpy as np
 import yaml
 from pathlib import Path
 from functools import reduce
 from prefect import flow, task
+from prefect.task_runners import ConcurrentTaskRunner
 
 from prefect_orchestra.flow.ge_validator import run_ge_checkpoint
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG_PATH = BASE_DIR / "prefect_orchestra" / "config" / "pipeline_config.yaml"
+
+
+def _load_config() -> dict:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -22,24 +34,27 @@ def read_staging_table(table_name: str, config: dict) -> pd.DataFrame:
     table_path = staging_dir / table_name / "data.parquet"
 
     if not table_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy bảng Staging: {table_path}")
+        raise FileNotFoundError(
+            f"Không tìm thấy bảng Staging: {table_path}\n"
+            "Hãy chạy staging_transform_flow() trước."
+        )
 
-    print(f"Đang đọc bảng staging '{table_name}' từ {table_path}")
+    print(f"[Mart] Đọc bảng staging '{table_name}' từ {table_path}")
     df = pd.read_parquet(table_path)
+    print(f"[Mart] '{table_name}': {len(df):,} rows loaded.")
     return df
 
 
-@task(log_prints=True)
-def save_mart_table(df: pd.DataFrame, table_name: str, config: dict):
+@task(log_prints=True, retries=1, retry_delay_seconds=10)
+def save_mart_table(df: pd.DataFrame, table_name: str, config: dict) -> str:
     """Lưu DataFrame vào tầng Mart dưới dạng một file Parquet."""
     mart_dir = BASE_DIR / config["paths"]["output_mart_dir"]
     output_path = mart_dir / table_name
     output_path.mkdir(parents=True, exist_ok=True)
 
     file_path = output_path / "data.parquet"
-    print(f"Đang lưu bảng mart '{table_name}' ({len(df)} rows) vào {file_path}")
     df.to_parquet(file_path, index=False, engine="pyarrow")
-    print(f"Đã lưu thành công.")
+    print(f"[Mart] ✓ '{table_name}': {len(df):,} rows → {file_path}")
     return str(file_path)
 
 
@@ -50,7 +65,7 @@ def save_mart_table(df: pd.DataFrame, table_name: str, config: dict):
 @task(log_prints=True)
 def build_mart_risk_model_features(staging_dfs: dict) -> pd.DataFrame:
     """Xây dựng bảng wide-table cho ML bằng cách LEFT JOIN tất cả các bảng staging."""
-    print("Đang xây dựng mart_risk_model_features...")
+    print("[Mart] Đang xây dựng mart_risk_model_features...")
 
     stg_app = staging_dfs["stg_application"]
 
@@ -68,18 +83,18 @@ def build_mart_risk_model_features(staging_dfs: dict) -> pd.DataFrame:
         stg_app,
     )
 
-    print(f"mart_risk_model_features xây dựng xong: shape {df_final.shape}")
+    print(f"[Mart] mart_risk_model_features: shape {df_final.shape}")
     return df_final
 
 
 @task(log_prints=True)
 def build_mart_risk_report_summary(model_features_df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng tóm tắt cho mục đích báo cáo với RISK_TIER bucket."""
-    print("Đang xây dựng mart_risk_report_summary...")
+    print("[Mart] Đang xây dựng mart_risk_report_summary...")
 
     df = model_features_df.copy()
 
-    # RISK_TIER logic (aligned với plan):
+    # RISK_TIER logic (aligned với governance plan):
     # High   : ext_source_2 < 0.3  AND bureau_max_overdue > 0
     # Low    : ext_source_2 > 0.5  AND bureau_avg_bad_status_rate < 0.1
     # Medium : everything else
@@ -109,14 +124,14 @@ def build_mart_risk_report_summary(model_features_df: pd.DataFrame) -> pd.DataFr
 
     existing_cols = [c for c in report_cols if c in df.columns]
     result = df[existing_cols]
-    print(f"mart_risk_report_summary xây dựng xong: shape {result.shape}")
+    print(f"[Mart] mart_risk_report_summary: shape {result.shape}")
     return result
 
 
 @task(log_prints=True)
 def build_mart_default_cohort(app_df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng tỉ lệ nợ xấu theo các nhóm cohort."""
-    print("Đang xây dựng mart_default_cohort...")
+    print("[Mart] Đang xây dựng mart_default_cohort...")
 
     cohort_dims = [
         "NAME_INCOME_TYPE",
@@ -130,7 +145,7 @@ def build_mart_default_cohort(app_df: pd.DataFrame) -> pd.DataFrame:
 
     for dim in cohort_dims:
         if dim not in app_df.columns:
-            print(f"Cột '{dim}' không tồn tại trong stg_application, bỏ qua.")
+            print(f"[Mart] Cột '{dim}' không tồn tại trong stg_application, bỏ qua.")
             continue
         cohort_agg = (
             app_df.groupby(dim)["TARGET"]
@@ -139,13 +154,18 @@ def build_mart_default_cohort(app_df: pd.DataFrame) -> pd.DataFrame:
             .rename(columns={"count": "TOTAL_COUNT", "sum": "DEFAULT_COUNT", dim: "COHORT_VALUE"})
         )
         cohort_agg["COHORT_DIM"] = dim
-        cohort_agg["DEFAULT_RATE"] = cohort_agg["DEFAULT_COUNT"] / cohort_agg["TOTAL_COUNT"]
+        cohort_agg["DEFAULT_RATE"] = (
+            cohort_agg["DEFAULT_COUNT"] / cohort_agg["TOTAL_COUNT"].replace(0, np.nan)
+        )
         all_cohorts.append(
             cohort_agg[["COHORT_DIM", "COHORT_VALUE", "TOTAL_COUNT", "DEFAULT_COUNT", "DEFAULT_RATE"]]
         )
 
+    if not all_cohorts:
+        raise ValueError("Không có cohort dimension nào được tìm thấy trong stg_application.")
+
     result = pd.concat(all_cohorts, ignore_index=True)
-    print(f"mart_default_cohort xây dựng xong: {len(result)} rows.")
+    print(f"[Mart] mart_default_cohort: {len(result):,} rows.")
     return result
 
 
@@ -153,18 +173,27 @@ def build_mart_default_cohort(app_df: pd.DataFrame) -> pd.DataFrame:
 # Mart Flow
 # ---------------------------------------------------------------------------
 
-@flow(name="Mart Build Flow", log_prints=True)
+@flow(
+    name="Mart Build Flow",
+    log_prints=True,
+    task_runner=ConcurrentTaskRunner(),
+    description="Staging → Mart: build 3 analytical tables (ML features, report, default cohort).",
+)
 def mart_build_flow():
     """
     Đọc dữ liệu từ tầng Staging, join chúng thành các bảng phân tích,
     và lưu kết quả vào tầng Mart.
+
+    mart_risk_report_summary và mart_default_cohort được build song song
+    sau khi mart_risk_model_features đã sẵn sàng.
     """
-    print("--- Bắt đầu Mart Build Flow ---")
+    print("[Mart] --- Bắt đầu Mart Build Flow ---")
+    config = _load_config()
+    ge_enabled = config.get("great_expectations", {}).get("enabled", True)
+    ge_root_dir = str(BASE_DIR / config["paths"]["ge_root_dir"])
 
-    with open(CONFIG_PATH, "r") as f:
-        config = yaml.safe_load(f)
-
-    staging_tables = [
+    # --- Đọc tất cả staging tables song song ---
+    staging_table_names = [
         "stg_application",
         "stg_bureau_summary",
         "stg_prev_application_summary",
@@ -172,26 +201,40 @@ def mart_build_flow():
         "stg_pos_cash_summary",
         "stg_credit_card_summary",
     ]
-    staging_dfs = {tbl: read_staging_table(tbl, config) for tbl in staging_tables}
+    staging_futures = {
+        tbl: read_staging_table.submit(tbl, config)
+        for tbl in staging_table_names
+    }
+
+    # Resolve futures thành dict của DataFrames
+    staging_dfs = {tbl: f.result() for tbl, f in staging_futures.items()}
 
     # --- Build mart tables ---
     model_features_df = build_mart_risk_model_features(staging_dfs)
-    save_model_future = save_mart_table.submit(model_features_df, "mart_risk_model_features", config)
+    save_model_f = save_mart_table.submit(model_features_df, "mart_risk_model_features", config)
 
-    report_summary_df = build_mart_risk_report_summary(model_features_df)
-    save_mart_table(report_summary_df, "mart_risk_report_summary", config)
+    # Report summary và default cohort có thể build song song
+    report_summary_f = build_mart_risk_report_summary.submit(model_features_df)
+    default_cohort_f = build_mart_default_cohort.submit(staging_dfs["stg_application"])
 
-    default_cohort_df = build_mart_default_cohort(staging_dfs["stg_application"])
-    save_mart_table(default_cohort_df, "mart_default_cohort", config)
-
-    # GE checkpoint sau khi mart chính đã được lưu
-    run_ge_checkpoint.submit(
-        checkpoint_name="mart_checkpoint",
-        ge_root_dir=str(BASE_DIR / "great_expectations"),
-        wait_for=[save_model_future],
+    save_report_f = save_mart_table.submit(
+        report_summary_f, "mart_risk_report_summary", config,
+        wait_for=[report_summary_f],
+    )
+    save_cohort_f = save_mart_table.submit(
+        default_cohort_f, "mart_default_cohort", config,
+        wait_for=[default_cohort_f],
     )
 
-    print("--- Mart Build Flow đã kết thúc ---")
+    # --- GE checkpoint sau khi tất cả mart tables đã được lưu ---
+    run_ge_checkpoint.submit(
+        checkpoint_name=config["great_expectations"]["mart_checkpoint"],
+        ge_root_dir=ge_root_dir,
+        enabled=ge_enabled,
+        wait_for=[save_model_f, save_report_f, save_cohort_f],
+    )
+
+    print("[Mart] --- Mart Build Flow đã kết thúc ---")
 
 
 if __name__ == "__main__":
