@@ -1,0 +1,31 @@
+# ─── Core orchestration ───────────────────────────────────────────────────────
+# anyio 3.x is required by Prefect 2.x — anyio 4.x broke GatherTaskGroup.
+# Pin the entire chain so pip doesn't silently upgrade.
+anyio==3.7.1
+prefect==2.19.9
+
+# ─── Data processing ──────────────────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+pyarrow==15.0.2
+fastparquet==2024.2.0          # fallback parquet engine (optional)
+
+# ─── Spark / Delta Lake (used by processing/ stack) ──────────────────────────
+pyspark==3.5.1
+delta-spark==3.1.0
+
+# ─── Storage & database ───────────────────────────────────────────────────────
+boto3==1.34.69                 # MinIO / S3-compatible SDK
+psycopg2-binary==2.9.9         # PostgreSQL driver
+sqlalchemy==2.0.29
+
+# ─── Data quality ────────────────────────────────────────────────────────────
+great-expectations==0.18.15
+
+# ─── Configuration & utilities ───────────────────────────────────────────────
+python-dotenv==1.0.1
+pyyaml==6.0.1
+click==8.1.7                   # used by prefect CLI + scripts
+
+# ─── Async runtime (must stay on 3.x to match Prefect 2.x) ──────────────────
+sniffio==1.3.1
