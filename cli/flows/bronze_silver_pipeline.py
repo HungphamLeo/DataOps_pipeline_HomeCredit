@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import time
@@ -22,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from platforms.processing.spark_stack.spark_session import get_spark_session
 from log.config.logger_setup import logger_manager
 
-LOGGER = logging.getLogger("homecredit.pipeline")
+LOGGER = logger_manager.get_logger(__name__)
 CONFIG_PATH = PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "cli" / "config" / "homecredit_config.yaml"
 

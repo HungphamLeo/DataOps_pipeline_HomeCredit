@@ -16,12 +16,12 @@ from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
 from prefect.tasks import task_input_hash
 
-from prefect_orchestra.flow.ge_validator import run_ge_checkpoint
+from cli.flows.serving.ge_validator import run_ge_checkpoint
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG_PATH = BASE_DIR / "prefect_orchestra" / "config" / "pipeline_config.yaml"
 from log.config.logger_setup import logger_manager
-logger = logger_manager.get_logger()
+logger = logger_manager.get_logger(__name__)
 
 def _load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -50,7 +50,7 @@ def ingest_source_to_bronze(source_config: dict, config: dict) -> str:
     file_name = source_config["file"]
     source_path = raw_data_dir / file_name
 
-    print(f"[Bronze] Đang xử lý '{table_name}' từ {source_path}...")
+    logger.info("bronze_ingest_started table=%s source=%s", table_name, source_path)
 
     if not source_path.exists():
         raise FileNotFoundError(
@@ -77,8 +77,9 @@ def ingest_source_to_bronze(source_config: dict, config: dict) -> str:
         engine="pyarrow",
         index=False,
     )
-    print(
-        f"[Bronze] ✓ '{table_name}': {len(df):,} rows → {parquet_path}"
+    logger.info(
+        "bronze_ingest_completed table=%s rows=%d path=%s",
+        table_name, len(df), parquet_path,
     )
     return str(partition_dir)
 

@@ -14,7 +14,7 @@ from pyspark.sql import SparkSession
 import os
 from log.config.logger_setup import logger_manager
 
-logger = logger_manager.get_logger()
+logger = logger_manager.get_logger(__name__)
 
 def get_spark_session(config: dict) -> SparkSession:
     """

@@ -11,7 +11,7 @@ import great_expectations as gx
 from prefect import task
 from log.config.logger_setup import logger_manager
 
-logger = logger_manager.get_logger()
+logger = logger_manager.get_logger(__name__)
 
 
 @task(log_prints=True, retries=1, retry_delay_seconds=10)
@@ -44,10 +44,13 @@ def run_ge_checkpoint(
         Nếu checkpoint thực thi nhưng validation kết quả là fail.
     """
     if not enabled:
-        print(f"[SKIP] GE validation bị tắt (enabled=False). Bỏ qua checkpoint '{checkpoint_name}'.")
+        logger.info("ge_validation_skipped checkpoint=%s", checkpoint_name)
         return True
 
-    print(f"Đang chạy Great Expectations checkpoint: '{checkpoint_name}' | root: {ge_root_dir}")
+    logger.info(
+        "ge_validation_started checkpoint=%s root=%s",
+        checkpoint_name, ge_root_dir,
+    )
 
     try:
         # GE >= 0.18.x: dùng get_context với mode="file" và project_root_dir
@@ -63,26 +66,29 @@ def run_ge_checkpoint(
         # Nếu checkpoint chưa tồn tại (GE chưa được setup), log cảnh báo thay vì crash
         err_msg = str(e).lower()
         if any(kw in err_msg for kw in ("not found", "does not exist", "no such file", "checkpoint")):
-            print(
-                f"[WARN] Checkpoint '{checkpoint_name}' chưa được thiết lập. "
-                "Bỏ qua validation — hãy chạy `great_expectations checkpoint new` để tạo."
+            logger.warning(
+                "ge_checkpoint_missing checkpoint=%s root=%s",
+                checkpoint_name, ge_root_dir,
             )
             return True
-        print(f"[ERROR] Lỗi khi chạy GE checkpoint '{checkpoint_name}': {e}")
+        logger.exception("ge_validation_failed checkpoint=%s", checkpoint_name)
         raise
 
     if not result["success"]:
-        print(f"[FAIL] Great Expectations checkpoint '{checkpoint_name}' thất bại!")
+        logger.error("ge_validation_failed checkpoint=%s", checkpoint_name)
         for run_result in result.run_results.values():
             validation_result = run_result.get("validation_result", {})
             for vr in validation_result.get("results", []):
                 if not vr.get("success", True):
                     etype = vr.get("expectation_config", {}).get("expectation_type", "unknown")
                     details = vr.get("result", {})
-                    print(f"  - FAILED: {etype} | details: {details}")
+                    logger.error(
+                        "ge_expectation_failed checkpoint=%s expectation=%s details=%s",
+                        checkpoint_name, etype, details,
+                    )
         raise ValueError(
             f"Kiểm tra chất lượng dữ liệu thất bại cho checkpoint '{checkpoint_name}'."
         )
 
-    print(f"[PASS] Great Expectations checkpoint '{checkpoint_name}' thành công!")
+    logger.info("ge_validation_completed checkpoint=%s", checkpoint_name)
     return True

@@ -11,7 +11,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, Optional
-import logging
 import yaml
 
 from log.config.logger_setup import logger_manager
@@ -69,7 +68,7 @@ class PrefectETLPipelineConfig:
         self._loader = config_loader or FileConfigLoader()
         self._logger_factory = logger_factory or DefaultLoggerFactory()
         self._loggers: Dict[str, logging.Logger] = {}
-        self._internal_logger = self._logger_factory.get_logger("logger.prefect")
+        self._internal_logger = self._logger_factory.get_logger(__name__)
         self._config: Dict[str, Any] = {}
         self._load_config()
 
@@ -95,27 +94,27 @@ class PrefectETLPipelineConfig:
 
     @property
     def ingestion_logger(self) -> logging.Logger:
-        return self._get_logger("logger.ingestion")
+        return self._get_logger(f"{__name__}.ingestion")
 
     @property
     def bronze_logger(self) -> logging.Logger:
-        return self._get_logger("logger.bronze")
+        return self._get_logger(f"{__name__}.bronze")
 
     @property
     def silver_logger(self) -> logging.Logger:
-        return self._get_logger("logger.silver")
+        return self._get_logger(f"{__name__}.silver")
 
     @property
     def gold_logger(self) -> logging.Logger:
-        return self._get_logger("logger.gold")
+        return self._get_logger(f"{__name__}.gold")
 
     @property
     def serving_logger(self) -> logging.Logger:
-        return self._get_logger("logger.serving")
+        return self._get_logger(f"{__name__}.serving")
 
     @property
     def data_quality_logger(self) -> logging.Logger:
-        return self._get_logger("logger.data_quality")
+        return self._get_logger(f"{__name__}.data_quality")
 
     # ========== Accessors & convenience ==========
 

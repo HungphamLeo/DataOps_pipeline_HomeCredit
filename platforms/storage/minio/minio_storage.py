@@ -59,7 +59,7 @@ class MinioStorageBackend(IObjectStorage):
             secret_key=secret_key,
             secure=secure,
         )
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logger_manager.get_logger(__name__)
         self.logger.info("minio_client_initialized endpoint=%s secure=%s", endpoint, secure)
 
     # ------------------------------------------------------------------

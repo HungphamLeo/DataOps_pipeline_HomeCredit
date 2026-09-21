@@ -8,12 +8,12 @@ import time
 from pathlib import Path
 from prefect import flow
 
-from prefect_orchestra.flow.bronze_flow import bronze_ingest_flow
-from prefect_orchestra.flow.staging_flow import staging_transform_flow
-from prefect_orchestra.flow.mart_flow import mart_build_flow
+from cli.flows.serving.bronze_flow import bronze_ingest_flow
+from cli.flows.serving.staging_flow import staging_transform_flow
+from cli.flows.serving.mart_flow import mart_build_flow
 from log.config.logger_setup import logger_manager
 
-logger = logger_manager.get_logger()
+logger = logger_manager.get_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -33,10 +33,12 @@ def master_pipeline_flow():
     3. Mart: Join Staging → 3 mart tables (ML features, report, default cohort).
     """
     start_ts = time.time()
+    logger.info("legacy_master_pipeline_started")
     bronze_ingest_flow()
     staging_transform_flow()
     mart_build_flow()
     elapsed = time.time() - start_ts
+    logger.info("legacy_master_pipeline_completed duration_seconds=%.2f", elapsed)
 
 
 if __name__ == "__main__":

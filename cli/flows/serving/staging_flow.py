@@ -11,9 +11,9 @@ from pathlib import Path
 from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
 
-from prefect_orchestra.flow.ge_validator import run_ge_checkpoint
+from cli.flows.serving.ge_validator import run_ge_checkpoint
 from log.config.logger_setup import logger_manager
-logger = logger_manager.get_logger()
+logger = logger_manager.get_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG_PATH = BASE_DIR / "prefect_orchestra" / "config" / "pipeline_config.yaml"
 
@@ -51,9 +51,12 @@ def read_latest_bronze_partition(table_name: str, config: dict) -> pd.DataFrame:
     if not parquet_files:
         raise FileNotFoundError(f"Không có file parquet trong partition: {latest_partition}")
 
-    print(f"[Staging] Đọc partition '{latest_partition.name}' cho bảng '{table_name}'")
+    logger.info(
+        "staging_partition_read_started table=%s partition=%s",
+        table_name, latest_partition.name,
+    )
     df = pd.read_parquet(latest_partition)
-    print(f"[Staging] '{table_name}': {len(df):,} rows loaded.")
+    logger.info("staging_partition_read_completed table=%s rows=%d", table_name, len(df))
     return df
 
 
@@ -66,7 +69,10 @@ def save_staging_table(df: pd.DataFrame, table_name: str, config: dict) -> str:
 
     file_path = output_path / "data.parquet"
     df.to_parquet(file_path, index=False, engine="pyarrow")
-    print(f"[Staging] ✓ '{table_name}': {len(df):,} rows → {file_path}")
+    logger.info(
+        "staging_table_saved table=%s rows=%d path=%s",
+        table_name, len(df), file_path,
+    )
     return str(file_path)
 
 
@@ -77,7 +83,7 @@ def save_staging_table(df: pd.DataFrame, table_name: str, config: dict) -> str:
 @task(log_prints=True)
 def build_stg_application(df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_application với các feature phái sinh."""
-    print("[Staging] Đang xây dựng stg_application...")
+    logger.info("staging_transform_started table=stg_application")
 
     df = df.copy()
     # DAYS_EMPLOYED == 365243 là mã hoá "không làm việc" / "chưa bao giờ đi làm"
@@ -91,14 +97,17 @@ def build_stg_application(df: pd.DataFrame) -> pd.DataFrame:
     df["CREDIT_GOODS_RATIO"] = df["AMT_CREDIT"] / df["AMT_GOODS_PRICE"].replace(0, np.nan)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    print(f"[Staging] stg_application: {len(df):,} rows, {len(df.columns)} cols.")
+    logger.info(
+        "staging_transform_completed table=stg_application rows=%d columns=%d",
+        len(df), len(df.columns),
+    )
     return df
 
 
 @task(log_prints=True)
 def build_stg_bureau_summary(bureau_df: pd.DataFrame, bureau_balance_df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_bureau_summary — aggregate lịch sử credit bureau theo SK_ID_CURR."""
-    print("[Staging] Đang xây dựng stg_bureau_summary...")
+    logger.info("staging_transform_started table=stg_bureau_summary")
 
     bb_agg = bureau_balance_df.groupby("SK_ID_BUREAU").agg(
         BUREAU_BALANCE_MONTHS_COUNT=("MONTHS_BALANCE", "size"),
@@ -118,14 +127,14 @@ def build_stg_bureau_summary(bureau_df: pd.DataFrame, bureau_balance_df: pd.Data
         BUREAU_AVG_BAD_STATUS_RATE=("BUREAU_BAD_STATUS_RATE", "mean"),
     ).reset_index()
 
-    print(f"[Staging] stg_bureau_summary: {len(bureau_agg):,} rows.")
+    logger.info("staging_transform_completed table=stg_bureau_summary rows=%d", len(bureau_agg))
     return bureau_agg
 
 
 @task(log_prints=True)
 def build_stg_prev_application_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_prev_application_summary — aggregate lịch sử đơn vay trước."""
-    print("[Staging] Đang xây dựng stg_prev_application_summary...")
+    logger.info("staging_transform_started table=stg_prev_application_summary")
 
     agg = df.groupby("SK_ID_CURR").agg(
         PREV_APP_COUNT=("SK_ID_PREV", "count"),
@@ -139,14 +148,14 @@ def build_stg_prev_application_summary(df: pd.DataFrame) -> pd.DataFrame:
     agg["PREV_APPROVAL_RATE"] = agg["PREV_APPROVED_COUNT"] / agg["PREV_APP_COUNT"].replace(0, np.nan)
     agg.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    print(f"[Staging] stg_prev_application_summary: {len(agg):,} rows.")
+    logger.info("staging_transform_completed table=stg_prev_application_summary rows=%d", len(agg))
     return agg
 
 
 @task(log_prints=True)
 def build_stg_installment_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_installment_summary — aggregate hành vi thanh toán."""
-    print("[Staging] Đang xây dựng stg_installment_summary...")
+    logger.info("staging_transform_started table=stg_installment_summary")
 
     df = df.copy()
     df["PAYMENT_DELAY_DAYS"] = df["DAYS_ENTRY_PAYMENT"] - df["DAYS_INSTALMENT"]
@@ -162,14 +171,14 @@ def build_stg_installment_summary(df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
 
     agg.replace([np.inf, -np.inf], np.nan, inplace=True)
-    print(f"[Staging] stg_installment_summary: {len(agg):,} rows.")
+    logger.info("staging_transform_completed table=stg_installment_summary rows=%d", len(agg))
     return agg
 
 
 @task(log_prints=True)
 def build_stg_pos_cash_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_pos_cash_summary — aggregate trạng thái POS/CASH hàng tháng."""
-    print("[Staging] Đang xây dựng stg_pos_cash_summary...")
+    logger.info("staging_transform_started table=stg_pos_cash_summary")
 
     agg = df.groupby("SK_ID_CURR").agg(
         POS_MONTHS_COUNT=("MONTHS_BALANCE", "size"),
@@ -181,14 +190,14 @@ def build_stg_pos_cash_summary(df: pd.DataFrame) -> pd.DataFrame:
     agg["POS_OVERDUE_RATE"] = agg["POS_OVERDUE_MONTHS"] / agg["POS_MONTHS_COUNT"].replace(0, np.nan)
     agg.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    print(f"[Staging] stg_pos_cash_summary: {len(agg):,} rows.")
+    logger.info("staging_transform_completed table=stg_pos_cash_summary rows=%d", len(agg))
     return agg
 
 
 @task(log_prints=True)
 def build_stg_credit_card_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Xây dựng bảng stg_credit_card_summary — aggregate hành vi thẻ tín dụng hàng tháng."""
-    print("[Staging] Đang xây dựng stg_credit_card_summary...")
+    logger.info("staging_transform_started table=stg_credit_card_summary")
 
     df = df.copy()
     df["CC_UTILIZATION"] = df["AMT_BALANCE"] / df["AMT_CREDIT_LIMIT_ACTUAL"].replace(0, np.nan)
@@ -204,7 +213,7 @@ def build_stg_credit_card_summary(df: pd.DataFrame) -> pd.DataFrame:
         CC_MAX_DPD=("SK_DPD", "max"),
     ).reset_index()
 
-    print(f"[Staging] stg_credit_card_summary: {len(agg):,} rows.")
+    logger.info("staging_transform_completed table=stg_credit_card_summary rows=%d", len(agg))
     return agg
 
 
@@ -227,7 +236,7 @@ def staging_transform_flow():
     tuần tự theo đúng thứ tự phụ thuộc dữ liệu. Các table độc lập
     được submit song song qua ConcurrentTaskRunner.
     """
-    print("[Staging] --- Bắt đầu Staging Transform Flow ---")
+    logger.info("staging_flow_started")
     config = _load_config()
     ge_enabled = config.get("great_expectations", {}).get("enabled", True)
     ge_root_dir = str(BASE_DIR / config["paths"]["ge_root_dir"])
@@ -265,7 +274,7 @@ def staging_transform_flow():
         wait_for=[save_app_f, save_bureau_f, save_prev_f, save_inst_f, save_pos_f, save_cc_f],
     )
 
-    print("[Staging] --- Staging Transform Flow đã kết thúc ---")
+    logger.info("staging_flow_completed")
 
 
 if __name__ == "__main__":
