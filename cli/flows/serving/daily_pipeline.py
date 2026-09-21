@@ -8,9 +8,8 @@ import time
 from pathlib import Path
 from prefect import flow
 
-from cli.flows.serving.bronze_flow import bronze_ingest_flow
-from cli.flows.serving.staging_flow import staging_transform_flow
-from cli.flows.serving.mart_flow import mart_build_flow
+from cli.flows.serving.bronze.bronze_flow import bronze_ingest_flow
+from cli.flows.serving.staging.staging_flow import staging_transform_flow
 from log.config.logger_setup import logger_manager
 
 logger = logger_manager.get_logger(__name__)
@@ -30,13 +29,13 @@ def master_pipeline_flow():
     Master flow điều phối toàn bộ pipeline DataOps:
     1. Bronze: Ingest CSV thô → Parquet, phân vùng theo _load_date.
     2. Staging: Transform, aggregate Bronze → 6 staging tables.
-    3. Mart: Join Staging → 3 mart tables (ML features, report, default cohort).
+    3. PostgreSQL schema stg contains the design-model target tables.
     """
     start_ts = time.time()
     logger.info("legacy_master_pipeline_started")
     bronze_ingest_flow()
     staging_transform_flow()
-    mart_build_flow()
+    # mart_build_flow()
     elapsed = time.time() - start_ts
     logger.info("legacy_master_pipeline_completed duration_seconds=%.2f", elapsed)
 

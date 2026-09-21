@@ -15,8 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 logger_manager.configure(str(PROJECT_ROOT / "log" / "config" / "logger_config.yaml"))
 logger = logger_manager.get_logger(__name__)
-from cli.flows.serving.bronze_flow import bronze_ingest_flow
-from cli.flows.serving.staging_flow import staging_transform_flow
+from cli.flows.serving.bronze.bronze_flow import bronze_ingest_flow
+from cli.flows.serving.staging.staging_flow import staging_transform_flow
 
 if __name__ == "__main__":
     logger.info("cli_pipeline_start")

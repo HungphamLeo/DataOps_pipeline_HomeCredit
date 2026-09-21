@@ -11,6 +11,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "cli" / "config" / "homecredit_config.yaml"
+STACK_CONFIG_PATH = PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
 DEFAULT_DESIGN_PATH = (
     PROJECT_ROOT / "cli" / "ingestion" / "design_modelling" / "Design modeling_doc.csv"
 )
@@ -30,6 +31,11 @@ def _expand(value: Any) -> Any:
 
 def load_config() -> dict:
     with CONFIG_PATH.open(encoding="utf-8") as file:
+        return _expand(yaml.safe_load(file) or {})
+
+
+def load_stack_config() -> dict:
+    with STACK_CONFIG_PATH.open(encoding="utf-8") as file:
         return _expand(yaml.safe_load(file) or {})
 
 
