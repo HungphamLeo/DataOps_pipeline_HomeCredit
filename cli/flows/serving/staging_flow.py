@@ -1,280 +1,280 @@
-"""
-Staging Transform Flow — Bronze → Staging Layer
+"""Config-driven Bronze to Staging transformations.
 
-Đọc dữ liệu từ tầng Bronze, áp dụng transform và aggregate,
-lưu kết quả vào tầng Staging.
+The flow contains only generic dataframe operations. Source-to-target mappings,
+recipes, formulas and constants live in ``homecredit_config.yaml`` and are
+validated against ``Design modeling_doc.csv``.
 """
-import pandas as pd
-import numpy as np
-import yaml
+
+from __future__ import annotations
+
 from pathlib import Path
-from prefect import flow, task
-from prefect.task_runners import ConcurrentTaskRunner
 
+import numpy as np
+import pandas as pd
+from prefect import flow, task
+from prefect.task_runners import SequentialTaskRunner
+
+from cli.flows.metadata import (
+    PROJECT_ROOT,
+    load_config,
+    load_design_metadata,
+    load_source_columns,
+    validate_recipe,
+)
 from cli.flows.serving.ge_validator import run_ge_checkpoint
 from log.config.logger_setup import logger_manager
+from platforms.processing.config.delta_utils import write_jdbc
+from platforms.processing.spark_stack.spark_session import get_spark_session
+
 logger = logger_manager.get_logger(__name__)
-BASE_DIR = Path(__file__).resolve().parents[2]
-CONFIG_PATH = BASE_DIR / "prefect_orchestra" / "config" / "pipeline_config.yaml"
 
 
-def _load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _constant(value: object, config: dict) -> object:
+    if isinstance(value, dict) and "constant" in value:
+        return config["constants"][value["constant"]]
+    return value
 
 
-# ---------------------------------------------------------------------------
-# Helper tasks
-# ---------------------------------------------------------------------------
-
-@task(log_prints=True, retries=2, retry_delay_seconds=10)
-def read_latest_bronze_partition(table_name: str, config: dict) -> pd.DataFrame:
-    """Đọc partition mới nhất từ một bảng trong tầng Bronze."""
-    bronze_dir = BASE_DIR / config["paths"]["output_bronze_dir"]
-    table_path = bronze_dir / f"bronze_{table_name}"
-
-    if not table_path.exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy đường dẫn bảng Bronze: {table_path}\n"
-            "Hãy chạy bronze_ingest_flow() trước."
-        )
-
+def _latest_bronze(config: dict, table_name: str) -> pd.DataFrame:
+    bronze = config["bronze"]
+    table_dir = PROJECT_ROOT / config["paths"]["bronze_dir"] / f"{bronze['output_prefix']}{table_name}"
     partitions = sorted(
-        [p for p in table_path.iterdir() if p.is_dir() and p.name.startswith("_load_date=")],
-        reverse=True,
+        path for path in table_dir.glob(f"{bronze['partition_column']}=*") if path.is_dir()
     )
     if not partitions:
-        raise FileNotFoundError(f"Không tìm thấy partition nào cho bảng Bronze: '{table_name}'")
+        raise FileNotFoundError(f"No Bronze partition found for source '{table_name}'")
+    path = partitions[-1] / "data.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"Bronze data file does not exist: {path}")
+    logger.info("staging_source_read_started table=%s path=%s", table_name, path)
+    frame = pd.read_parquet(path)
+    logger.info("staging_source_read_completed table=%s rows=%d", table_name, len(frame))
+    return frame
 
-    latest_partition = partitions[0]
-    parquet_files = list(latest_partition.glob("*.parquet"))
-    if not parquet_files:
-        raise FileNotFoundError(f"Không có file parquet trong partition: {latest_partition}")
 
-    logger.info(
-        "staging_partition_read_started table=%s partition=%s",
-        table_name, latest_partition.name,
+def _apply_transforms(frame: pd.DataFrame, recipe: dict, config: dict) -> pd.DataFrame:
+    frame = frame.copy()
+    for transform in recipe.get("transforms", []):
+        operation = transform["op"]
+        if operation == "replace":
+            source = _constant(transform["from"], config)
+            frame[transform["column"]] = frame[transform["column"]].replace(
+                source, _constant(transform.get("to"), config)
+            )
+        elif operation == "flag_equals":
+            frame[transform["output"]] = (
+                frame[transform["column"]] == _constant(transform["value"], config)
+            ).astype("int8")
+        elif operation == "divide":
+            denominator = _constant(transform["denominator"], config)
+            frame[transform["output"]] = (
+                frame[transform["numerator"]] * transform.get("multiplier", 1)
+                / denominator
+            )
+        elif operation == "ratio":
+            denominator = frame[transform["denominator"]].replace(0, np.nan)
+            frame[transform["output"]] = frame[transform["numerator"]] / denominator
+        elif operation == "subtract":
+            frame[transform["output"]] = (
+                frame[transform["left"]] - frame[transform["right"]]
+            )
+        elif operation == "greater_than_flag":
+            frame[transform["output"]] = (
+                frame[transform["column"]] > _constant(transform["value"], config)
+            ).astype("int8")
+        elif operation == "clip_subtract":
+            frame[transform["output"]] = (
+                frame[transform["left"]] - frame[transform["right"]]
+            ).clip(lower=_constant(transform["lower"], config))
+        else:
+            raise ValueError(f"Unsupported configured transform operation: {operation}")
+    return frame.replace([np.inf, -np.inf], np.nan)
+
+
+def _apply_pre_aggregations(
+    frame: pd.DataFrame, recipe: dict, join_key: str
+) -> pd.DataFrame:
+    if not recipe.get("pre_aggregations"):
+        return frame
+    results = frame[[join_key]].drop_duplicates().set_index(join_key)
+    for aggregation in recipe["pre_aggregations"]:
+        series = frame[aggregation["source"]].astype(str)
+        if aggregation["operation"] != "mean_in":
+            raise ValueError(f"Unsupported pre-aggregation: {aggregation['operation']}")
+        values = set(aggregation["values"])
+        result = series.isin(values).groupby(frame[join_key]).mean()
+        results[aggregation["output"]] = result
+    return results.reset_index()
+
+
+def _aggregate(frame: pd.DataFrame, recipe: dict) -> pd.DataFrame:
+    group_by = recipe["group_by"]
+    grouped = frame.groupby(group_by, dropna=False)
+    output = frame[group_by].drop_duplicates().set_index(group_by)
+    for name, specification in recipe.get("aggregations", {}).items():
+        column = specification["column"]
+        operation = specification["operation"]
+        series = frame[column]
+        if operation == "count":
+            result = grouped[column].count()
+        elif operation == "sum":
+            result = grouped[column].sum()
+        elif operation == "mean":
+            result = grouped[column].mean()
+        elif operation == "max":
+            result = grouped[column].max()
+        elif operation == "nunique":
+            result = grouped[column].nunique()
+        elif operation == "count_equals":
+            result = series.eq(specification["value"]).groupby(
+                [frame[key] for key in group_by]
+            ).sum()
+        elif operation == "count_greater_than":
+            result = series.gt(specification["value"]).groupby(
+                [frame[key] for key in group_by]
+            ).sum()
+        elif operation == "mean_positive":
+            positive = series.where(series > 0)
+            result = positive.groupby(
+                [frame[key] for key in group_by]
+            ).mean()
+        else:
+            raise ValueError(f"Unsupported configured aggregation: {operation}")
+        output[name] = result
+    return output.reset_index()
+
+
+def build_recipe(recipe: dict, config: dict) -> pd.DataFrame:
+    inputs = {name: _latest_bronze(config, name) for name in recipe["inputs"]}
+    frame = inputs[recipe["inputs"][0]]
+
+    join = recipe.get("join")
+    if join:
+        if len(recipe["inputs"]) != 2:
+            raise ValueError("Configured join recipes must have exactly two inputs")
+        right_name = recipe["inputs"][1]
+        right = _apply_pre_aggregations(
+            inputs[right_name], recipe, join["right_on"]
+        )
+        frame = frame.merge(
+            right,
+            how=join["how"],
+            left_on=join["left_on"],
+            right_on=join["right_on"],
+            suffixes=("", f"_{right_name}"),
+        )
+
+    frame = _apply_transforms(frame, recipe, config)
+    return _aggregate(frame, recipe) if recipe.get("aggregations") else frame
+
+
+def _spark_config(config: dict) -> dict:
+    """Build the technology configuration required by the shared Spark factory."""
+    stack_path = PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
+    import yaml
+
+    with stack_path.open(encoding="utf-8") as file:
+        stack_config = yaml.safe_load(file) or {}
+    return stack_config
+
+
+def _postgres_config(config: dict) -> dict:
+    postgres = dict(config["postgres"])
+    postgres["dbname"] = postgres["database"]
+    postgres["schema"] = config["staging"]["output_schema"]
+    return postgres
+
+
+def _ensure_postgres_schema(config: dict) -> None:
+    import psycopg2
+
+    postgres = config["postgres"]
+    schema = config["staging"]["output_schema"]
+    logger.info("postgres_schema_check_started schema=%s", schema)
+    with psycopg2.connect(
+        host=postgres["host"],
+        port=postgres["port"],
+        dbname=postgres["database"],
+        user=postgres["user"],
+        password=postgres["password"],
+    ) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+    logger.info("postgres_schema_check_completed schema=%s", schema)
+
+
+@task(log_prints=False)
+def transform_and_save(table_name: str, recipe: dict, config: dict) -> str:
+    frame = build_recipe(recipe, config)
+    staging = config["staging"]
+    _ensure_postgres_schema(config)
+    output_path = (
+        PROJECT_ROOT / config["paths"]["staging_dir"] / table_name / "data.parquet"
     )
-    df = pd.read_parquet(latest_partition)
-    logger.info("staging_partition_read_completed table=%s rows=%d", table_name, len(df))
-    return df
+    if staging["write_intermediate_parquet"]:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(
+            output_path,
+            engine=config["runtime"]["parquet_engine"],
+            index=False,
+        )
 
-
-@task(log_prints=True, retries=1, retry_delay_seconds=10)
-def save_staging_table(df: pd.DataFrame, table_name: str, config: dict) -> str:
-    """Lưu DataFrame vào tầng Staging dưới dạng một file Parquet."""
-    staging_dir = BASE_DIR / config["paths"]["output_staging_dir"]
-    output_path = staging_dir / table_name
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    file_path = output_path / "data.parquet"
-    df.to_parquet(file_path, index=False, engine="pyarrow")
-    logger.info(
-        "staging_table_saved table=%s rows=%d path=%s",
-        table_name, len(df), file_path,
+    spark = get_spark_session(_spark_config(config))
+    spark_frame = spark.createDataFrame(frame)
+    write_jdbc(
+        spark_frame,
+        _postgres_config(config),
+        table_name,
+        mode=config["postgres"]["write_mode"],
     )
-    return str(file_path)
-
-
-# ---------------------------------------------------------------------------
-# Transform tasks
-# ---------------------------------------------------------------------------
-
-@task(log_prints=True)
-def build_stg_application(df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_application với các feature phái sinh."""
-    logger.info("staging_transform_started table=stg_application")
-
-    df = df.copy()
-    # DAYS_EMPLOYED == 365243 là mã hoá "không làm việc" / "chưa bao giờ đi làm"
-    df["DAYS_EMPLOYED_ANOMALY"] = (df["DAYS_EMPLOYED"] == 365243).astype(int)
-    df["DAYS_EMPLOYED"] = df["DAYS_EMPLOYED"].replace({365243: np.nan})
-
-    df["AGE_YEARS"] = df["DAYS_BIRTH"] / -365.0
-    df["EMPLOYED_YEARS"] = df["DAYS_EMPLOYED"] / -365.0
-    df["INCOME_CREDIT_RATIO"] = df["AMT_INCOME_TOTAL"] / df["AMT_CREDIT"].replace(0, np.nan)
-    df["ANNUITY_INCOME_RATIO"] = df["AMT_ANNUITY"] / df["AMT_INCOME_TOTAL"].replace(0, np.nan)
-    df["CREDIT_GOODS_RATIO"] = df["AMT_CREDIT"] / df["AMT_GOODS_PRICE"].replace(0, np.nan)
-
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     logger.info(
-        "staging_transform_completed table=stg_application rows=%d columns=%d",
-        len(df), len(df.columns),
+        "staging_table_saved table=%s rows=%d columns=%d schema=%s intermediate_parquet=%s",
+        table_name,
+        len(frame),
+        len(frame.columns),
+        config["staging"]["output_schema"],
+        staging["write_intermediate_parquet"],
     )
-    return df
+    return table_name
 
-
-@task(log_prints=True)
-def build_stg_bureau_summary(bureau_df: pd.DataFrame, bureau_balance_df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_bureau_summary — aggregate lịch sử credit bureau theo SK_ID_CURR."""
-    logger.info("staging_transform_started table=stg_bureau_summary")
-
-    bb_agg = bureau_balance_df.groupby("SK_ID_BUREAU").agg(
-        BUREAU_BALANCE_MONTHS_COUNT=("MONTHS_BALANCE", "size"),
-        BUREAU_BAD_STATUS_RATE=("STATUS", lambda x: np.mean(x.isin(["1", "2", "3", "4", "5"]))),
-    ).reset_index()
-
-    bureau_full = bureau_df.merge(bb_agg, how="left", on="SK_ID_BUREAU")
-
-    bureau_agg = bureau_full.groupby("SK_ID_CURR").agg(
-        BUREAU_LOAN_COUNT=("SK_ID_BUREAU", "nunique"),
-        BUREAU_ACTIVE_COUNT=("CREDIT_ACTIVE", lambda x: (x == "Active").sum()),
-        BUREAU_CLOSED_COUNT=("CREDIT_ACTIVE", lambda x: (x == "Closed").sum()),
-        BUREAU_MAX_OVERDUE=("AMT_CREDIT_MAX_OVERDUE", "max"),
-        BUREAU_TOTAL_DEBT=("AMT_CREDIT_SUM_DEBT", "sum"),
-        BUREAU_TOTAL_CREDIT=("AMT_CREDIT_SUM", "sum"),
-        BUREAU_AVG_DPD=("CREDIT_DAY_OVERDUE", "mean"),
-        BUREAU_AVG_BAD_STATUS_RATE=("BUREAU_BAD_STATUS_RATE", "mean"),
-    ).reset_index()
-
-    logger.info("staging_transform_completed table=stg_bureau_summary rows=%d", len(bureau_agg))
-    return bureau_agg
-
-
-@task(log_prints=True)
-def build_stg_prev_application_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_prev_application_summary — aggregate lịch sử đơn vay trước."""
-    logger.info("staging_transform_started table=stg_prev_application_summary")
-
-    agg = df.groupby("SK_ID_CURR").agg(
-        PREV_APP_COUNT=("SK_ID_PREV", "count"),
-        PREV_APPROVED_COUNT=("NAME_CONTRACT_STATUS", lambda x: (x == "Approved").sum()),
-        PREV_REFUSED_COUNT=("NAME_CONTRACT_STATUS", lambda x: (x == "Refused").sum()),
-        PREV_AVG_CREDIT=("AMT_CREDIT", "mean"),
-        PREV_MAX_CREDIT=("AMT_CREDIT", "max"),
-        PREV_AVG_ANNUITY=("AMT_ANNUITY", "mean"),
-    ).reset_index()
-
-    agg["PREV_APPROVAL_RATE"] = agg["PREV_APPROVED_COUNT"] / agg["PREV_APP_COUNT"].replace(0, np.nan)
-    agg.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    logger.info("staging_transform_completed table=stg_prev_application_summary rows=%d", len(agg))
-    return agg
-
-
-@task(log_prints=True)
-def build_stg_installment_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_installment_summary — aggregate hành vi thanh toán."""
-    logger.info("staging_transform_started table=stg_installment_summary")
-
-    df = df.copy()
-    df["PAYMENT_DELAY_DAYS"] = df["DAYS_ENTRY_PAYMENT"] - df["DAYS_INSTALMENT"]
-    df["PAYMENT_IS_LATE"] = (df["PAYMENT_DELAY_DAYS"] > 0).astype(int)
-    df["PAYMENT_AMT_SHORTFALL"] = (df["AMT_INSTALMENT"] - df["AMT_PAYMENT"]).clip(lower=0)
-
-    agg = df.groupby("SK_ID_CURR").agg(
-        INSTALMENT_COUNT=("NUM_INSTALMENT_NUMBER", "count"),
-        INSTALMENT_LATE_COUNT=("PAYMENT_IS_LATE", "sum"),
-        INSTALMENT_LATE_RATE=("PAYMENT_IS_LATE", "mean"),
-        INSTALMENT_AVG_DELAY_DAYS=("PAYMENT_DELAY_DAYS", lambda x: x[x > 0].mean()),
-        INSTALMENT_AMT_SHORTFALL=("PAYMENT_AMT_SHORTFALL", "sum"),
-    ).reset_index()
-
-    agg.replace([np.inf, -np.inf], np.nan, inplace=True)
-    logger.info("staging_transform_completed table=stg_installment_summary rows=%d", len(agg))
-    return agg
-
-
-@task(log_prints=True)
-def build_stg_pos_cash_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_pos_cash_summary — aggregate trạng thái POS/CASH hàng tháng."""
-    logger.info("staging_transform_started table=stg_pos_cash_summary")
-
-    agg = df.groupby("SK_ID_CURR").agg(
-        POS_MONTHS_COUNT=("MONTHS_BALANCE", "size"),
-        POS_MAX_DPD=("SK_DPD", "max"),
-        POS_AVG_DPD=("SK_DPD", "mean"),
-        POS_OVERDUE_MONTHS=("SK_DPD", lambda x: (x > 0).sum()),
-    ).reset_index()
-
-    agg["POS_OVERDUE_RATE"] = agg["POS_OVERDUE_MONTHS"] / agg["POS_MONTHS_COUNT"].replace(0, np.nan)
-    agg.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    logger.info("staging_transform_completed table=stg_pos_cash_summary rows=%d", len(agg))
-    return agg
-
-
-@task(log_prints=True)
-def build_stg_credit_card_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Xây dựng bảng stg_credit_card_summary — aggregate hành vi thẻ tín dụng hàng tháng."""
-    logger.info("staging_transform_started table=stg_credit_card_summary")
-
-    df = df.copy()
-    df["CC_UTILIZATION"] = df["AMT_BALANCE"] / df["AMT_CREDIT_LIMIT_ACTUAL"].replace(0, np.nan)
-    df["CC_PAYMENT_RATIO"] = df["AMT_PAYMENT_TOTAL_CURRENT"] / df["AMT_INST_MIN_REGULARITY"].replace(0, np.nan)
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    agg = df.groupby("SK_ID_CURR").agg(
-        CC_MONTHS_COUNT=("MONTHS_BALANCE", "size"),
-        CC_AVG_BALANCE=("AMT_BALANCE", "mean"),
-        CC_MAX_BALANCE=("AMT_BALANCE", "max"),
-        CC_AVG_UTILIZATION=("CC_UTILIZATION", "mean"),
-        CC_AVG_PAYMENT_RATIO=("CC_PAYMENT_RATIO", "mean"),
-        CC_MAX_DPD=("SK_DPD", "max"),
-    ).reset_index()
-
-    logger.info("staging_transform_completed table=stg_credit_card_summary rows=%d", len(agg))
-    return agg
-
-
-# ---------------------------------------------------------------------------
-# Staging Flow
-# ---------------------------------------------------------------------------
 
 @flow(
     name="Staging Transform Flow",
-    log_prints=True,
-    task_runner=ConcurrentTaskRunner(),
-    description="Bronze → Staging: transform + aggregate 6 staging tables.",
+    log_prints=False,
+    task_runner=SequentialTaskRunner(),
+    description="Execute metadata-driven Bronze to PostgreSQL Staging recipes.",
 )
-def staging_transform_flow():
-    """
-    Đọc dữ liệu từ tầng Bronze, áp dụng các phép biến đổi và tổng hợp,
-    và lưu kết quả vào tầng Staging.
+def staging_transform_flow() -> list[str]:
+    config = load_config()["project_params"]
+    metadata = load_design_metadata()
+    source_columns = load_source_columns(config)
+    recipes = config["staging"]["recipes"]
+    if not recipes:
+        raise ValueError("No Staging recipes configured")
 
-    Lưu ý: các bước read bronze → build staging → save staging được thực hiện
-    tuần tự theo đúng thứ tự phụ thuộc dữ liệu. Các table độc lập
-    được submit song song qua ConcurrentTaskRunner.
-    """
-    logger.info("staging_flow_started")
-    config = _load_config()
-    ge_enabled = config.get("great_expectations", {}).get("enabled", True)
-    ge_root_dir = str(BASE_DIR / config["paths"]["ge_root_dir"])
+    for recipe in recipes.values():
+        validate_recipe(recipe, metadata, source_columns)
 
-    # --- Đọc tất cả Bronze tables ---
-    app_f = read_latest_bronze_partition.submit("application", config)
-    bureau_f = read_latest_bronze_partition.submit("bureau", config)
-    bureau_balance_f = read_latest_bronze_partition.submit("bureau_balance", config)
-    prev_app_f = read_latest_bronze_partition.submit("previous_application", config)
-    installments_f = read_latest_bronze_partition.submit("installments_payments", config)
-    pos_cash_f = read_latest_bronze_partition.submit("pos_cash_balance", config)
-    credit_card_f = read_latest_bronze_partition.submit("credit_card_balance", config)
-
-    # --- Build staging tables (các bước phụ thuộc vào kết quả đọc bronze) ---
-    stg_app_f = build_stg_application.submit(app_f)
-    stg_bureau_f = build_stg_bureau_summary.submit(bureau_f, bureau_balance_f)
-    stg_prev_f = build_stg_prev_application_summary.submit(prev_app_f)
-    stg_inst_f = build_stg_installment_summary.submit(installments_f)
-    stg_pos_f = build_stg_pos_cash_summary.submit(pos_cash_f)
-    stg_cc_f = build_stg_credit_card_summary.submit(credit_card_f)
-
-    # --- Lưu các staging tables ---
-    save_app_f = save_staging_table.submit(stg_app_f, "stg_application", config)
-    save_bureau_f = save_staging_table.submit(stg_bureau_f, "stg_bureau_summary", config)
-    save_prev_f = save_staging_table.submit(stg_prev_f, "stg_prev_application_summary", config)
-    save_inst_f = save_staging_table.submit(stg_inst_f, "stg_installment_summary", config)
-    save_pos_f = save_staging_table.submit(stg_pos_f, "stg_pos_cash_summary", config)
-    save_cc_f = save_staging_table.submit(stg_cc_f, "stg_credit_card_summary", config)
-
-    # --- GE checkpoint sau khi tất cả staging tables đã được lưu ---
-    run_ge_checkpoint.submit(
-        checkpoint_name=config["great_expectations"]["staging_checkpoint"],
-        ge_root_dir=ge_root_dir,
-        enabled=ge_enabled,
-        wait_for=[save_app_f, save_bureau_f, save_prev_f, save_inst_f, save_pos_f, save_cc_f],
+    _ensure_postgres_schema(config)
+    logger.info("staging_flow_started recipe_count=%d", len(recipes))
+    task_options = transform_and_save.with_options(
+        retries=config["runtime"]["retries"],
+        retry_delay_seconds=config["runtime"]["retry_delay_seconds"],
     )
+    outputs = [
+        task_options.submit(table_name, recipe, config).result()
+        for table_name, recipe in recipes.items()
+    ]
 
-    logger.info("staging_flow_completed")
+    ge = config["great_expectations"]
+    if ge["enabled"]:
+        run_ge_checkpoint.submit(
+            checkpoint_name=ge["staging_checkpoint"],
+            ge_root_dir=str(PROJECT_ROOT / config["paths"]["ge_root_dir"]),
+            enabled=True,
+        )
+    logger.info("staging_flow_completed table_count=%d", len(outputs))
+    return outputs
 
 
 if __name__ == "__main__":

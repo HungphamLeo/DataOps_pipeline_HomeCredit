@@ -1,121 +1,100 @@
-"""
-Bronze Ingest Flow — CSV → Parquet (Bronze Layer)
+"""Config-driven raw CSV ingestion into the Bronze layer."""
 
-Đọc 7 file CSV nguồn, thêm metadata, và lưu dạng Parquet phân vùng
-theo _load_date vào tầng Bronze.
+from __future__ import annotations
 
-Root cause fix: sử dụng ConcurrentTaskRunner thay vì ThreadPoolTaskRunner
-mặc định để tránh lỗi GatherTaskGroup với anyio 4.x. Với anyio 3.x
-(pin trong requirements.txt) thì ThreadPoolTaskRunner cũng hoạt động.
-"""
-import pandas as pd
-import yaml
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pandas as pd
 from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
 from prefect.tasks import task_input_hash
 
+from cli.flows.metadata import PROJECT_ROOT, load_config
 from cli.flows.serving.ge_validator import run_ge_checkpoint
-
-BASE_DIR = Path(__file__).resolve().parents[2]
-CONFIG_PATH = BASE_DIR / "prefect_orchestra" / "config" / "pipeline_config.yaml"
 from log.config.logger_setup import logger_manager
+
 logger = logger_manager.get_logger(__name__)
 
-def _load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+
+def _source_path(config: dict, source: dict) -> Path:
+    return PROJECT_ROOT / config["paths"]["source_dir"] / source["file"]
 
 
 @task(
-    retries=2,
-    retry_delay_seconds=30,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=1),
-    log_prints=True,
+    log_prints=False,
 )
-def ingest_source_to_bronze(source_config: dict, config: dict) -> str:
-    """
-    Đọc một file CSV nguồn, thêm metadata, và lưu dưới dạng Parquet
-    đã phân vùng vào tầng Bronze.
-
-    Idempotency: mỗi lần chạy ghi vào partition _load_date=<ngày hôm nay>.
-    Chạy lại cùng ngày sẽ overwrite đúng thư mục partition đó.
-    """
-    raw_data_dir = BASE_DIR / config["paths"]["raw_data_dir"]
-    bronze_dir = BASE_DIR / config["paths"]["output_bronze_dir"]
-
-    table_name = source_config["name"]
-    file_name = source_config["file"]
-    source_path = raw_data_dir / file_name
+def ingest_source_to_bronze(source: dict, config: dict) -> str:
+    source_path = _source_path(config, source)
+    bronze = config["bronze"]
+    load_date = datetime.utcnow().strftime(config["runtime"]["load_date_format"])
+    table_name = source["name"]
 
     logger.info("bronze_ingest_started table=%s source=%s", table_name, source_path)
-
     if not source_path.exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy file nguồn: {source_path}\n"
-            "Hãy đặt các file HC_*.csv vào thư mục sql/dev/source_data/"
-        )
+        logger.error("bronze_source_missing table=%s source=%s", table_name, source_path)
+        raise FileNotFoundError(f"Source file does not exist: {source_path}")
 
-    df = pd.read_csv(source_path, low_memory=False)
+    frame = pd.read_csv(
+        source_path,
+        low_memory=config["runtime"]["csv_low_memory"],
+        encoding=config["runtime"].get("csv_encoding", "utf-8"),
+    )
+    metadata = bronze["metadata_columns"]
+    frame[metadata["load_timestamp"]] = datetime.utcnow().isoformat()
+    frame[metadata["source_file"]] = source["file"]
+    frame[metadata["load_date"]] = load_date
 
-    # --- Metadata columns ---
-    load_ts = datetime.utcnow()
-    df["_load_ts"] = load_ts.isoformat()          # string: safe cho parquet partition
-    df["_source_file"] = file_name
-    df["_load_date"] = load_ts.strftime("%Y-%m-%d")  # partition key as string
-
-    # --- Idempotent write: overwrite chỉ partition của ngày hôm nay ---
-    output_dir = bronze_dir / f"bronze_{table_name}"
-    partition_dir = output_dir / f"_load_date={load_ts.strftime('%Y-%m-%d')}"
-    partition_dir.mkdir(parents=True, exist_ok=True)
-
-    parquet_path = partition_dir / "data.parquet"
-    df.drop(columns=["_load_date"]).to_parquet(
-        parquet_path,
-        engine="pyarrow",
+    output_dir = (
+        PROJECT_ROOT / config["paths"]["bronze_dir"]
+        / f"{bronze['output_prefix']}{table_name}"
+        / f"{bronze['partition_column']}={load_date}"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "data.parquet"
+    frame.to_parquet(
+        output_path,
+        engine=config["runtime"]["parquet_engine"],
         index=False,
     )
     logger.info(
         "bronze_ingest_completed table=%s rows=%d path=%s",
-        table_name, len(df), parquet_path,
+        table_name, len(frame), output_path,
     )
-    return str(partition_dir)
+    return str(output_dir)
 
 
 @flow(
     name="Bronze Ingest Flow",
-    log_prints=True,
+    log_prints=False,
     task_runner=ConcurrentTaskRunner(),
-    description="Ingest 7 raw CSV sources vào Bronze layer (Parquet, partitioned by _load_date).",
+    description="Ingest configured source files into partitioned Bronze Parquet.",
 )
-def bronze_ingest_flow():
-    """
-    Điều phối việc ingest tất cả các nguồn CSV vào tầng Bronze.
-
-    Tất cả 7 table được ingest song song (ConcurrentTaskRunner).
-    GE checkpoint chỉ chạy sau khi tất cả ingest task hoàn thành.
-    """
-    config = _load_config()
-    ge_enabled = config.get("great_expectations", {}).get("enabled", True)
-    ge_root_dir = str(BASE_DIR / config["paths"]["ge_root_dir"])
-
+def bronze_ingest_flow() -> list[str]:
+    config = load_config()["project_params"]
     sources = config["sources"]
+    if not sources:
+        raise ValueError("No Bronze sources configured")
 
-    # Submit tất cả ingest tasks song song
-    ingest_futures = [
-        ingest_source_to_bronze.submit(source_config=source, config=config)
-        for source in sources
-    ]
-
-    # GE checkpoint chạy sau khi toàn bộ ingest hoàn thành
-    run_ge_checkpoint.submit(
-        checkpoint_name=config["great_expectations"]["bronze_checkpoint"],
-        ge_root_dir=ge_root_dir,
-        enabled=ge_enabled,
-        wait_for=ingest_futures,
+    logger.info("bronze_flow_started source_count=%d", len(sources))
+    task_options = ingest_source_to_bronze.with_options(
+        retries=config["runtime"]["retries"],
+        retry_delay_seconds=config["runtime"]["retry_delay_seconds"],
+        cache_key_fn=task_input_hash,
+        cache_expiration=timedelta(days=config["runtime"]["cache_days"]),
     )
+    futures = [task_options.submit(source, config) for source in sources]
+    outputs = [future.result() for future in futures]
+
+    ge = config["great_expectations"]
+    if ge["enabled"]:
+        run_ge_checkpoint.submit(
+            checkpoint_name=ge["bronze_checkpoint"],
+            ge_root_dir=str(PROJECT_ROOT / config["paths"]["ge_root_dir"]),
+            enabled=True,
+        )
+    logger.info("bronze_flow_completed table_count=%d", len(outputs))
+    return outputs
 
 
 if __name__ == "__main__":

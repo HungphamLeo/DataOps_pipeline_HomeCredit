@@ -6,7 +6,7 @@ Provides:
 - get_delta_path            — builds the S3A path for a Delta table
 - write_delta_partitioned   — partition-overwrite write (Bronze)
 - write_delta               — full-overwrite write (Staging)
-- write_jdbc                — write to PostgreSQL via JDBC (Mart)
+- write_jdbc                — write to PostgreSQL via JDBC (Silver/Mart)
 - run_sql_transform         — execute a SQL file with Spark
 """
 from pyspark.sql import DataFrame, SparkSession
@@ -107,7 +107,7 @@ def write_jdbc(df: DataFrame, pg_config: dict, table_name: str, mode: str = "ove
     ----------
     df : DataFrame
     pg_config : dict
-        Sub-dict from pipeline_config.yaml under "postgres".
+        PostgreSQL config from the active pipeline configuration.
     table_name : str
         Bare table name (without schema prefix); the schema is taken from pg_config.
     mode : str
@@ -116,7 +116,7 @@ def write_jdbc(df: DataFrame, pg_config: dict, table_name: str, mode: str = "ove
     host = pg_config["host"]
     port = pg_config["port"]
     dbname = pg_config["dbname"]
-    schema = pg_config.get("schema", "mart")
+    schema = pg_config.get("schema", "stg")
 
     jdbc_url = f"jdbc:postgresql://{host}:{port}/{dbname}"
     properties = {
