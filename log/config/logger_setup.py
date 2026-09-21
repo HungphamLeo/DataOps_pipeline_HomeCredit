@@ -1,5 +1,7 @@
 import logging
 import logging.config
+import json
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import yaml
@@ -7,6 +9,26 @@ import yaml
 
 def _ensure_log_dir(path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+class JsonFormatter(logging.Formatter):
+    """Serialize log records as valid JSON for ingestion by log collectors."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "time": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "line": record.lineno,
+            "process": record.process,
+            "thread": record.threadName,
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
 
 class LoggerManager:
     _instance: Optional['LoggerManager'] = None
@@ -19,7 +41,7 @@ class LoggerManager:
         return cls._instance
 
     def __init__(self, config_path: Optional[str] = None):
-        self.config_path = Path(config_path) if config_path else Path(__file__).parent / "config" / "logger_config.yaml"
+        self.config_path = Path(config_path) if config_path else Path(__file__).with_name("logger_config.yaml")
         self.config: Dict[str, Any] = {}
         self._initialized = False
         if config_path is not None:
@@ -153,7 +175,11 @@ class LoggerManager:
             if isinstance(config, dict):
                 for handler in config.get("handlers", {}).values():
                     if isinstance(handler, dict) and "filename" in handler:
-                        _ensure_log_dir(handler["filename"])
+                        filename = Path(os.path.expandvars(str(handler["filename"])))
+                        if not filename.is_absolute():
+                            filename = Path(__file__).parents[2] / filename
+                        handler["filename"] = str(filename)
+                        _ensure_log_dir(filename)
             return config # pragma: no cover
         except FileNotFoundError:
             # Fallback config mặc định
@@ -194,32 +220,21 @@ class LoggerManager:
             self.config = {}
         logging.config.dictConfig(self.config)
 
-    def get_logger(self, module_name: str, logger_name: Optional[str] = None) -> logging.Logger:
+    def get_logger(self, module_name: str = __name__, logger_name: Optional[str] = None) -> logging.Logger:
         """
         Lấy logger cho module cụ thể.
         :param module_name: Tên module (sử dụng __name__), ví dụ: 'platforms.ingestion.cophieu68.extract'
         :param logger_name: Tên logger cụ thể nếu muốn ghi đè mặc định.
         :return: Logger instance
         """
+        if not self._initialized:
+            self.configure()
+
         cache_key = logger_name or module_name
         if cache_key in self._loggers:
             return self._loggers[cache_key]
 
-        if logger_name:
-            logger = logging.getLogger(logger_name)
-        else:
-            # Nếu module nằm trong ingestion/processing/storage/governance, cố gắng dùng logger chuyên biệt.
-            normalized = module_name.replace('platforms.', '')
-            if 'ingestion' in normalized:
-                logger = logging.getLogger('logger.ingestion_log')
-            elif 'processing' in normalized:
-                logger = logging.getLogger('logger.processing_log')
-            elif 'storage' in normalized:
-                logger = logging.getLogger('logger.storage_log')
-            elif 'orchestration' in normalized or 'metadata' in normalized or 'governance' in normalized:
-                logger = logging.getLogger('logger.governance_log')
-            else:
-                logger = logging.getLogger(module_name)
+        logger = logging.getLogger(logger_name or module_name)
 
         self._loggers[cache_key] = logger
         return logger
