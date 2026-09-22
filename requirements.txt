@@ -9,7 +9,7 @@
 python-dotenv==1.1.1
 PyYAML==6.0.2
 # Prefect 2.20 parameter schemas are incompatible with Pydantic 2.11.
-pydantic==2.9.2
+pydantic==2.11.7
 pydantic-settings==2.5.2
 click<8.2,>=8.0
 Jinja2==3.1.4
@@ -63,7 +63,6 @@ deltalake==0.18.2
 # -----------------------------------------------------------------------------
 # Web scraping / ingestion
 # -----------------------------------------------------------------------------
-beautifulsoup4==4.14.2
 lxml==5.3.0
 
 # -----------------------------------------------------------------------------
