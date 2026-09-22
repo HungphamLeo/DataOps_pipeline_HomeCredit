@@ -69,16 +69,15 @@ def write_delta_partitioned(df: DataFrame, path: str, partition_col: str = "_loa
     Bronze write strategy: partition overwrite.
     Chạy lại cùng ngày sẽ overwrite đúng partition đó, không nhân đôi data.
     """
-    logger.info("delta_partitioned_write_started path=%s partition=%s", path, partition_col)
-    (
-        df.write
-        .format("delta")
-        .mode("overwrite")
-        .option("partitionOverwriteMode", "dynamic")
-        .partitionBy(partition_col)
-        .save(path)
-    )
-    logger.info("delta_partitioned_write_completed path=%s", path)
+    try:
+        logger.info("delta_partitioned_write_started path=%s partition=%s", path, partition_col)
+        (df.write.format("delta").mode("overwrite")
+         .option("partitionOverwriteMode", "dynamic")
+         .partitionBy(partition_col).save(path))
+        logger.info("delta_partitioned_write_completed path=%s", path)
+    except Exception as e:
+        logger.exception("delta_partitioned_write_failed path=%s error=%s", path, e)
+        raise
 
 
 def write_delta(df: DataFrame, path: str) -> None:
@@ -86,14 +85,13 @@ def write_delta(df: DataFrame, path: str) -> None:
     Staging write strategy: full overwrite.
     Staging là derived data, recompute từ Bronze mỗi lần.
     """
-    logger.info("delta_write_started path=%s", path)
-    (
-        df.write
-        .format("delta")
-        .mode("overwrite")
-        .save(path)
-    )
-    logger.info("delta_write_completed path=%s", path)
+    try:
+        logger.info("delta_write_started path=%s", path)
+        df.write.format("delta").mode("overwrite").save(path)
+        logger.info("delta_write_completed path=%s", path)
+    except Exception as e:
+        logger.exception("delta_write_failed path=%s error=%s", path, e)
+        raise
 
 
 def write_jdbc(df: DataFrame, pg_config: dict, table_name: str, mode: str = "overwrite") -> None:
@@ -127,20 +125,21 @@ def write_jdbc(df: DataFrame, pg_config: dict, table_name: str, mode: str = "ove
     }
     full_table_name = f"{schema}.{table_name}"
 
-    logger.info(
-        "jdbc_write_started table=%s schema=%s mode=%s",
-        table_name, schema, mode,
-    )
-    (
-        df.write
-        .jdbc(
-            url=jdbc_url,
-            table=full_table_name,
-            mode=mode,
-            properties=properties,
+    try:
+        logger.info(
+            "jdbc_write_started table=%s schema=%s mode=%s",
+            table_name, schema, mode,
         )
-    )
-    logger.info("jdbc_write_completed table=%s schema=%s", table_name, schema)
+        df.write.jdbc(
+            url=jdbc_url, table=full_table_name, mode=mode, properties=properties,
+        )
+        logger.info("jdbc_write_completed table=%s schema=%s", table_name, schema)
+    except Exception as e:
+        logger.exception(
+            "jdbc_write_failed table=%s schema=%s mode=%s error=%s",
+            table_name, schema, mode, e,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +155,10 @@ def run_sql_transform(spark: SparkSession, sql_path: str) -> DataFrame:
         bronze_df.createOrReplaceTempView("bronze_application")
         result_df = run_sql_transform(spark, "sql/staging/stg_application.sql")
     """
-    with open(sql_path, "r", encoding="utf-8") as f:
-        sql_query = f.read()
-    return spark.sql(sql_query)
+    try:
+        with open(sql_path, "r", encoding="utf-8") as f:
+            sql_query = f.read()
+        return spark.sql(sql_query)
+    except Exception as e:
+        logger.exception("spark_sql_transform_failed sql_path=%s error=%s", sql_path, e)
+        raise

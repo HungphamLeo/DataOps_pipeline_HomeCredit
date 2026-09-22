@@ -71,7 +71,9 @@ def run_ge_checkpoint(
                 checkpoint_name, ge_root_dir,
             )
             return True
-        logger.exception("ge_validation_failed checkpoint=%s", checkpoint_name)
+        logger.exception(
+            "ge_validation_failed checkpoint=%s error=%s", checkpoint_name, e
+        )
         raise
 
     if not result["success"]:

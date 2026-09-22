@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 from prefect import flow
 
-from cli.flows.serving.bronze.bronze_flow import bronze_ingest_flow
-from cli.flows.serving.staging.staging_flow import staging_transform_flow
+from cli.flows.serving.bronze_flow import bronze_ingest_flow
+from cli.flows.serving.staging_flow import staging_transform_flow
 from log.config.logger_setup import logger_manager
 
 logger = logger_manager.get_logger(__name__)
@@ -32,17 +32,24 @@ def master_pipeline_flow():
     3. PostgreSQL schema stg contains the design-model target tables.
     """
     start_ts = time.time()
-    logger.info("legacy_master_pipeline_started")
-    bronze_ingest_flow()
-    staging_transform_flow()
-    # mart_build_flow()
-    elapsed = time.time() - start_ts
-    logger.info("legacy_master_pipeline_completed duration_seconds=%.2f", elapsed)
+    try:
+        logger.info("master_pipeline_started")
+        bronze_ingest_flow()
+        staging_transform_flow()
+        elapsed = time.time() - start_ts
+        logger.info("master_pipeline_completed duration_seconds=%.2f", elapsed)
+    except Exception as e:
+        logger.exception(
+            "master_pipeline_failed duration_seconds=%.2f error=%s",
+            time.time() - start_ts,
+            e,
+        )
+        raise
 
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
     # Chạy pipeline một lần ngay lập tức để test
-    master_pipeline_flow()
+    # master_pipeline_flow()
 
     # --- Scheduling ---
     # Để schedule pipeline chạy lúc 1 giờ sáng hàng ngày, deploy với Prefect CLI:

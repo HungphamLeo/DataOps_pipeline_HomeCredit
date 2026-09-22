@@ -9,8 +9,8 @@
 python-dotenv==1.1.1
 PyYAML==6.0.2
 # Prefect 2.20 parameter schemas are incompatible with Pydantic 2.11.
-pydantic==2.11.7
-pydantic-settings==2.5.2
+pydantic==2.6.4
+pydantic-settings==2.2.1
 click<8.2,>=8.0
 Jinja2==3.1.4
 marshmallow==3.23.2
@@ -38,6 +38,7 @@ aiohttp==3.10.11
 # -----------------------------------------------------------------------------
 croniter<2.0.0,>=1.0.12
 pendulum>=2.1.2,<=3.0
+anyio<5.0.0,>=4.4.0
 pytz>=2021.1,<2024
 python-dateutil==2.9.0.post0
 

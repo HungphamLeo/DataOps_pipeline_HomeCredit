@@ -51,16 +51,21 @@ class MinioStorageBackend(IObjectStorage):
         secret_key : MinIO / S3 secret key.
         secure     : Use TLS (False for local dev).
         """
-        from minio import Minio
-
-        self._client = Minio(
-            endpoint,
-            access_key=access_key,
-            secret_key=secret_key,
-            secure=secure,
-        )
         self.logger = logger or logger_manager.get_logger(__name__)
-        self.logger.info("minio_client_initialized endpoint=%s secure=%s", endpoint, secure)
+        try:
+            from minio import Minio
+            self._client = Minio(
+                endpoint,
+                access_key=access_key,
+                secret_key=secret_key,
+                secure=secure,
+            )
+            self.logger.info("minio_client_initialized endpoint=%s secure=%s", endpoint, secure)
+        except Exception as e:
+            self.logger.exception(
+                "minio_client_initialization_failed endpoint=%s error=%s", endpoint, e
+            )
+            raise
 
     # ------------------------------------------------------------------
     # IObjectStorage implementation
@@ -68,11 +73,15 @@ class MinioStorageBackend(IObjectStorage):
 
     def ensure_bucket(self, bucket: str) -> None:
         """Create bucket if it does not exist."""
-        if not self._client.bucket_exists(bucket):
-            self._client.make_bucket(bucket)
-            self.logger.info("[MinIO] Created bucket: %s", bucket)
-        else:
-            self.logger.debug("[MinIO] Bucket already exists: %s", bucket)
+        try:
+            if not self._client.bucket_exists(bucket):
+                self._client.make_bucket(bucket)
+                self.logger.info("minio_bucket_created bucket=%s", bucket)
+            else:
+                self.logger.debug("minio_bucket_exists bucket=%s", bucket)
+        except Exception as e:
+            self.logger.exception("minio_bucket_check_failed bucket=%s error=%s", bucket, e)
+            raise
 
     def upload_bytes(
         self,
@@ -82,43 +91,55 @@ class MinioStorageBackend(IObjectStorage):
         content_type: str = "application/octet-stream",
     ) -> None:
         """Upload raw bytes to MinIO."""
-        self.ensure_bucket(bucket)
-        buf = io.BytesIO(data)
-        self._client.put_object(
-            bucket_name=bucket,
-            object_name=key,
-            data=buf,
-            length=len(data),
-            content_type=content_type,
-        )
-        self.logger.info(
-            "minio_upload_completed bucket=%s key=%s bytes=%d",
-            bucket, key, len(data),
-        )
+        try:
+            self.ensure_bucket(bucket)
+            buf = io.BytesIO(data)
+            self._client.put_object(
+                bucket_name=bucket,
+                object_name=key,
+                data=buf,
+                length=len(data),
+                content_type=content_type,
+            )
+            self.logger.info(
+                "minio_upload_completed bucket=%s key=%s bytes=%d",
+                bucket, key, len(data),
+            )
+        except Exception as e:
+            self.logger.exception("minio_upload_failed bucket=%s key=%s error=%s", bucket, key, e)
+            raise
 
     def download_bytes(self, bucket: str, key: str) -> bytes:
         """Download object content as bytes."""
-        response = self._client.get_object(bucket, key)
         try:
-            data = response.read()
-            self.logger.info(
-                "minio_download_completed bucket=%s key=%s bytes=%d",
-                bucket, key, len(data),
-            )
-            return data
-        finally:
-            response.close()
-            response.release_conn()
+            response = self._client.get_object(bucket, key)
+            try:
+                data = response.read()
+                self.logger.info(
+                    "minio_download_completed bucket=%s key=%s bytes=%d",
+                    bucket, key, len(data),
+                )
+                return data
+            finally:
+                response.close()
+                response.release_conn()
+        except Exception as e:
+            self.logger.exception("minio_download_failed bucket=%s key=%s error=%s", bucket, key, e)
+            raise
 
     def list_objects(self, bucket: str, prefix: str) -> List[str]:
         """Return list of object keys under *prefix* (recursive)."""
-        objects = self._client.list_objects(bucket, prefix=prefix, recursive=True)
-        keys = [obj.object_name for obj in objects]
-        self.logger.info(
-            "minio_list_completed bucket=%s prefix=%s objects=%d",
-            bucket, prefix, len(keys),
-        )
-        return keys
+        try:
+            objects = self._client.list_objects(bucket, prefix=prefix, recursive=True)
+            keys = [obj.object_name for obj in objects]
+            self.logger.info(
+                "minio_list_completed bucket=%s prefix=%s objects=%d",
+                bucket, prefix, len(keys),
+            )
+            return keys
+        except Exception as e:
+            self.logger.exception("minio_list_failed bucket=%s prefix=%s error=%s", bucket, prefix, e)
+            raise
 
     def object_exists(self, bucket: str, key: str) -> bool:
         """Return True if the object exists in the bucket."""
@@ -131,6 +152,9 @@ class MinioStorageBackend(IObjectStorage):
         except S3Error:
             self.logger.debug("minio_object_exists bucket=%s key=%s exists=false", bucket, key)
             return False
+        except Exception as e:
+            self.logger.exception("minio_object_exists_failed bucket=%s key=%s error=%s", bucket, key, e)
+            raise
 
     # ------------------------------------------------------------------
     # Polars / Parquet helpers

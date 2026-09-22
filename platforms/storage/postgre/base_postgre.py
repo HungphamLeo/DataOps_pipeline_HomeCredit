@@ -33,39 +33,50 @@ class PostgreSQLWriter(IRelationalStorage):
         self.user = username
         self.password = password
         self.logger = logger or logger_manager.get_logger(__name__)
-        self._pool = pg_pool.ThreadedConnectionPool(
-            pool_min,
-            pool_max,
-            host=host,
-            port=port,
-            database=database,
-            user=username,
-            password=password,
-        )
-        self.logger.info(
-            "postgres_pool_initialized host=%s port=%s database=%s pool_min=%s pool_max=%s",
-            host,
-            port,
-            database,
-            pool_min,
-            pool_max,
-        )
+        try:
+            self._pool = pg_pool.ThreadedConnectionPool(
+                pool_min, pool_max, host=host, port=port, database=database,
+                user=username, password=password,
+            )
+            self.logger.info(
+                "postgres_pool_initialized host=%s port=%s database=%s pool_min=%s pool_max=%s",
+                host, port, database, pool_min, pool_max,
+            )
+        except Exception as e:
+            self.logger.exception(
+                "postgres_pool_initialization_failed host=%s port=%s database=%s error=%s",
+                host, port, database, e,
+            )
+            raise
 
     @contextmanager
     def _conn(self):
-        conn = self._pool.getconn()
+        conn = None
         try:
+            conn = self._pool.getconn()
             yield conn
             conn.commit()
-        except Exception:
-            conn.rollback()
+        except Exception as e:
+            if conn is not None:
+                conn.rollback()
+            self.logger.exception(
+                "postgres_connection_operation_failed database=%s error=%s",
+                self.database, e,
+            )
             raise
         finally:
-            self._pool.putconn(conn)
+            if conn is not None:
+                self._pool.putconn(conn)
 
     def close(self) -> None:
-        self._pool.closeall()
-        self.logger.info("postgres_pool_closed database=%s", self.database)
+        try:
+            self._pool.closeall()
+            self.logger.info("postgres_pool_closed database=%s", self.database)
+        except Exception as e:
+            self.logger.exception(
+                "postgres_pool_close_failed database=%s error=%s", self.database, e
+            )
+            raise
 
     def execute(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
         try:
@@ -73,9 +84,9 @@ class PostgreSQLWriter(IRelationalStorage):
                 cursor.execute(sql, params)
             self.logger.debug("postgres_execute_completed")
             return {"ok": True}
-        except Exception as exc:
-            self.logger.error("postgres_execute_failed error=%s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc)}
+        except Exception as e:
+            self.logger.exception("postgres_execute_failed error=%s", e)
+            return {"ok": False, "error": str(e)}
 
     def query(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
         try:
@@ -85,9 +96,9 @@ class PostgreSQLWriter(IRelationalStorage):
                 rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
             self.logger.debug("postgres_query_completed rows=%d", len(rows))
             return {"ok": True, "results": rows}
-        except Exception as exc:
-            self.logger.error("postgres_query_failed error=%s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc), "results": []}
+        except Exception as e:
+            self.logger.exception("postgres_query_failed error=%s", e)
+            return {"ok": False, "error": str(e), "results": []}
 
     def insert(self, target: str, data: Any) -> Dict[str, Any]:
         if not data:
@@ -102,9 +113,9 @@ class PostgreSQLWriter(IRelationalStorage):
                 cursor.executemany(sql, records)
             self.logger.info("postgres_insert_completed table=%s rows=%d", target, len(records))
             return {"ok": True, "inserted_count": len(records)}
-        except Exception as exc:
-            self.logger.error("postgres_insert_failed table=%s error=%s", target, exc, exc_info=True)
-            return {"ok": False, "inserted_count": 0, "error": str(exc)}
+        except Exception as e:
+            self.logger.exception("postgres_insert_failed table=%s error=%s", target, e)
+            return {"ok": False, "inserted_count": 0, "error": str(e)}
 
     def upsert(
         self,
@@ -132,26 +143,38 @@ class PostgreSQLWriter(IRelationalStorage):
                 cursor.executemany(sql, data)
             self.logger.info("postgres_upsert_completed table=%s rows=%d", target, len(data))
             return {"ok": True, "upserted_count": len(data)}
-        except Exception as exc:
-            self.logger.error("postgres_upsert_failed table=%s error=%s", target, exc, exc_info=True)
-            return {"ok": False, "upserted_count": 0, "error": str(exc)}
+        except Exception as e:
+            self.logger.exception("postgres_upsert_failed table=%s error=%s", target, e)
+            return {"ok": False, "upserted_count": 0, "error": str(e)}
 
     def bulk_insert(self, table: str, data: Any) -> Dict[str, Any]:
-        if hasattr(data, "to_dict"):
-            data = data.to_dict("records")
-        return self.insert(table, data)
+        try:
+            if hasattr(data, "to_dict"):
+                data = data.to_dict("records")
+            return self.insert(table, data)
+        except Exception as e:
+            self.logger.exception("postgres_bulk_insert_failed table=%s error=%s", table, e)
+            raise
 
     def ensure_schema(self, schema: str) -> Dict[str, Any]:
-        return self.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        try:
+            return self.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        except Exception as e:
+            self.logger.exception("postgres_schema_creation_failed schema=%s error=%s", schema, e)
+            raise
 
     def execute_script(self, sql_script: str) -> Dict[str, Any]:
-        errors = []
-        for statement in (item.strip() for item in sql_script.split(";")):
-            if statement:
-                result = self.execute(statement)
-                if not result["ok"]:
-                    errors.append(result["error"])
-        return {"ok": not errors, "errors": errors}
+        try:
+            errors = []
+            for statement in (item.strip() for item in sql_script.split(";")):
+                if statement:
+                    result = self.execute(statement)
+                    if not result["ok"]:
+                        errors.append(result["error"])
+            return {"ok": not errors, "errors": errors}
+        except Exception as e:
+            self.logger.exception("postgres_script_execution_failed error=%s", e)
+            raise
 
 
 class PostgreSQLStorageBackend(StorageBackend):
@@ -169,6 +192,8 @@ class PostgreSQLStorageBackend(StorageBackend):
         try:
             result = self.pg.insert(dataset_name, data)
             return {"ok": True, **result}
-        except Exception as exc:
-            self.logger.exception("postgres_storage_save_failed table=%s", dataset_name)
-            return {"ok": False, "error": str(exc)}
+        except Exception as e:
+            self.logger.exception(
+                "postgres_storage_save_failed table=%s error=%s", dataset_name, e
+            )
+            return {"ok": False, "error": str(e)}
