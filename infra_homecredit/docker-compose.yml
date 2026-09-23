@@ -1,0 +1,142 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:14-alpine
+    container_name: homecredit_postgres
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin_homecredit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-homecredit_mart}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - homecredit-net
+
+  # ─── MinIO object storage ───────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: homecredit_minio
+    restart: unless-stopped
+    ports:
+      - "9002:9000"   # S3 API
+      - "9003:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - homecredit-net
+
+  # ─── MinIO bucket initializer ───────────────────────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: homecredit_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - homecredit-net
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER:-minioadmin}:${MINIO_ROOT_PASSWORD:-change_me}@minio:9000
+    entrypoint: >
+      bash -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-change_me} &&
+        mc mb local/lakehouse --ignore-existing &&
+        echo 'MinIO bucket lakehouse initialized.'
+      "
+
+  # ─── Prefect server ─────────────────────────────────────────────────────────
+  prefect-server:
+    image: prefecthq/prefect:2.20.25-python3.11
+    container_name: homecredit_prefect_server
+    restart: unless-stopped
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_DATABASE_CONNECTION_URL: "postgresql+asyncpg://${POSTGRES_USER:-admin_homecredit}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-homecredit_mart}"
+    command: prefect server start --host 0.0.0.0 --port 4200
+    ports:
+      - "4201:4200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - homecredit-net
+
+  # ─── Prefect worker (process work pool) ─────────────────────────────────────
+  prefect-worker:
+    image: prefecthq/prefect:2.20.25-python3.11
+    container_name: homecredit_prefect_worker
+    restart: unless-stopped
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+    command: >
+      bash -c "
+        sleep 10 &&
+        prefect work-pool create default-pool --type process --overwrite || true &&
+        prefect worker start --pool default-pool
+      "
+    depends_on:
+      - prefect-server
+    networks:
+      - homecredit-net
+
+  pipeline:
+    build:
+      context: ..
+      dockerfile: infra_homecredit/Dockerfile
+    container_name: homecredit_pipeline
+    restart: "no"
+    environment:
+      HOME_CREDIT_ENV: ${HOME_CREDIT_ENV:-development}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-admin_homecredit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-homecredit_mart}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lakehouse}
+      SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      # Mount source CSV vào đúng path mà config.py expects
+      SOURCE_DIR: /app/cli/ingestion/source_data
+    volumes:
+      # Mount thư mục CSV từ host vào container
+      # Đặt CSV files vào ~/DataOps_pipeline_HomeCredit/cli/ingestion/source_data/ trên host
+      - ../cli/ingestion/source_data:/app/cli/ingestion/source_data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    command: ["python", "-m", "cli.main"]
+    networks:
+      - homecredit-net
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  homecredit-net:
+    driver: bridge
