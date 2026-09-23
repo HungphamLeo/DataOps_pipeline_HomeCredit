@@ -34,9 +34,9 @@ build/
 logs/**/*.log
 logs/**/*.log.*
 
-homecredit_config.yaml
-stack.yml
-docker-compose.yml
+
+
+
 # =============================================================================
 # KHÔNG ignore các loại file quan trọng sau:
 # *.yaml
