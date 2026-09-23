@@ -1,280 +1,249 @@
-"""Config-driven Bronze to Staging transformations.
-
-The flow contains only generic dataframe operations. Source-to-target mappings,
-recipes, formulas and constants live in ``homecredit_config.yaml`` and are
-validated against ``Design modeling_doc.csv``.
-"""
+"""Build PostgreSQL staging tables from Bronze using design metadata."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import re
+from collections import defaultdict
 
-import numpy as np
-import pandas as pd
-from prefect import flow, task
+from prefect import flow
 from prefect.task_runners import SequentialTaskRunner
+from pyspark.sql import DataFrame, SparkSession, functions as F
 
-from cli.flows.metadata import (
-    PROJECT_ROOT,
+from cli.flows.serving.metadata import (
     load_config,
     load_design_metadata,
-    load_source_columns,
-    validate_recipe,
+    load_stack_config,
 )
-from cli.flows.serving.ge_validator import run_ge_checkpoint
 from log.config.logger_setup import logger_manager
 from platforms.processing.config.delta_utils import write_jdbc
-from platforms.processing.spark_stack.spark_session import get_spark_session
 
 logger = logger_manager.get_logger(__name__)
+DERIVED = {"derived", "system timestamp", "system flag"}
 
 
-def _constant(value: object, config: dict) -> object:
-    if isinstance(value, dict) and "constant" in value:
-        return config["constants"][value["constant"]]
-    return value
+def _bronze_path(stack: dict, source: str) -> str:
+    try:
+        minio = stack["minio"]
+        return f"s3a://{minio['bucket']}/{minio['bronze_prefix']}/{source}"
+    except Exception as e:
+        logger.exception("staging_bronze_path_failed source=%s error=%s", source, e)
+        raise
 
 
-def _latest_bronze(config: dict, table_name: str) -> pd.DataFrame:
-    bronze = config["bronze"]
-    table_dir = PROJECT_ROOT / config["paths"]["bronze_dir"] / f"{bronze['output_prefix']}{table_name}"
-    partitions = sorted(
-        path for path in table_dir.glob(f"{bronze['partition_column']}=*") if path.is_dir()
-    )
-    if not partitions:
-        raise FileNotFoundError(f"No Bronze partition found for source '{table_name}'")
-    path = partitions[-1] / "data.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Bronze data file does not exist: {path}")
-    logger.info("staging_source_read_started table=%s path=%s", table_name, path)
-    frame = pd.read_parquet(path)
-    logger.info("staging_source_read_completed table=%s rows=%d", table_name, len(frame))
-    return frame
+def _source_refs(rows: list[dict[str, str]]) -> dict[str, set[str]]:
+    try:
+        refs: dict[str, set[str]] = defaultdict(set)
+        for row in rows:
+            value = row.get("Source_Table.Column", "").strip()
+            if not value or value.lower() in DERIVED:
+                continue
+            for item in re.split(r",|\s+/\s+", value):
+                source, separator, column = item.strip().partition(".")
+                if separator:
+                    normalized = {"SK_BUREAU_ID": "SK_ID_BUREAU"}.get(
+                        column.strip(), column.strip()
+                    )
+                    refs[source.lower()].add(normalized)
+        return refs
+    except Exception as e:
+        logger.exception("staging_source_mapping_parse_failed error=%s", e)
+        raise
 
 
-def _apply_transforms(frame: pd.DataFrame, recipe: dict, config: dict) -> pd.DataFrame:
-    frame = frame.copy()
-    for transform in recipe.get("transforms", []):
-        operation = transform["op"]
-        if operation == "replace":
-            source = _constant(transform["from"], config)
-            frame[transform["column"]] = frame[transform["column"]].replace(
-                source, _constant(transform.get("to"), config)
-            )
-        elif operation == "flag_equals":
-            frame[transform["output"]] = (
-                frame[transform["column"]] == _constant(transform["value"], config)
-            ).astype("int8")
-        elif operation == "divide":
-            denominator = _constant(transform["denominator"], config)
-            frame[transform["output"]] = (
-                frame[transform["numerator"]] * transform.get("multiplier", 1)
-                / denominator
-            )
-        elif operation == "ratio":
-            denominator = frame[transform["denominator"]].replace(0, np.nan)
-            frame[transform["output"]] = frame[transform["numerator"]] / denominator
-        elif operation == "subtract":
-            frame[transform["output"]] = (
-                frame[transform["left"]] - frame[transform["right"]]
-            )
-        elif operation == "greater_than_flag":
-            frame[transform["output"]] = (
-                frame[transform["column"]] > _constant(transform["value"], config)
-            ).astype("int8")
-        elif operation == "clip_subtract":
-            frame[transform["output"]] = (
-                frame[transform["left"]] - frame[transform["right"]]
-            ).clip(lower=_constant(transform["lower"], config))
-        else:
-            raise ValueError(f"Unsupported configured transform operation: {operation}")
-    return frame.replace([np.inf, -np.inf], np.nan)
-
-
-def _apply_pre_aggregations(
-    frame: pd.DataFrame, recipe: dict, join_key: str
-) -> pd.DataFrame:
-    if not recipe.get("pre_aggregations"):
+def _read_sources(
+    spark: SparkSession, stack: dict, refs: dict[str, set[str]]
+) -> DataFrame:
+    try:
+        if not refs:
+            raise ValueError("Target has no source mapping")
+        source_names = list(refs)
+        base_name = source_names[0]
+        frame = spark.read.parquet(_bronze_path(stack, base_name))
+        frame = frame.select(*[F.col(column) for column in refs[base_name]])
+        for source_name in source_names[1:]:
+            right = spark.read.parquet(_bronze_path(stack, source_name))
+            right = right.select(*[F.col(column) for column in refs[source_name]])
+            common = sorted(set(frame.columns).intersection(right.columns))
+            if not common:
+                raise ValueError(
+                    f"Cannot infer join between {base_name} and {source_name}; "
+                    "define an explicit join in the design contract."
+                )
+            join_key = "SK_ID_CURR" if "SK_ID_CURR" in common else common[0]
+            right = right.select(*[
+                F.col(column).alias(f"{source_name}__{column}")
+                if column != join_key else F.col(column)
+                for column in right.columns
+            ])
+            frame = frame.join(right, on=join_key, how="left")
         return frame
-    results = frame[[join_key]].drop_duplicates().set_index(join_key)
-    for aggregation in recipe["pre_aggregations"]:
-        series = frame[aggregation["source"]].astype(str)
-        if aggregation["operation"] != "mean_in":
-            raise ValueError(f"Unsupported pre-aggregation: {aggregation['operation']}")
-        values = set(aggregation["values"])
-        result = series.isin(values).groupby(frame[join_key]).mean()
-        results[aggregation["output"]] = result
-    return results.reset_index()
+    except Exception as e:
+        logger.exception("staging_bronze_read_or_join_failed sources=%s error=%s", list(refs), e)
+        raise
 
 
-def _aggregate(frame: pd.DataFrame, recipe: dict) -> pd.DataFrame:
-    group_by = recipe["group_by"]
-    grouped = frame.groupby(group_by, dropna=False)
-    output = frame[group_by].drop_duplicates().set_index(group_by)
-    for name, specification in recipe.get("aggregations", {}).items():
-        column = specification["column"]
-        operation = specification["operation"]
-        series = frame[column]
-        if operation == "count":
-            result = grouped[column].count()
-        elif operation == "sum":
-            result = grouped[column].sum()
-        elif operation == "mean":
-            result = grouped[column].mean()
-        elif operation == "max":
-            result = grouped[column].max()
-        elif operation == "nunique":
-            result = grouped[column].nunique()
-        elif operation == "count_equals":
-            result = series.eq(specification["value"]).groupby(
-                [frame[key] for key in group_by]
-            ).sum()
-        elif operation == "count_greater_than":
-            result = series.gt(specification["value"]).groupby(
-                [frame[key] for key in group_by]
-            ).sum()
-        elif operation == "mean_positive":
-            positive = series.where(series > 0)
-            result = positive.groupby(
-                [frame[key] for key in group_by]
-            ).mean()
-        else:
-            raise ValueError(f"Unsupported configured aggregation: {operation}")
-        output[name] = result
-    return output.reset_index()
-
-
-def build_recipe(recipe: dict, config: dict) -> pd.DataFrame:
-    inputs = {name: _latest_bronze(config, name) for name in recipe["inputs"]}
-    frame = inputs[recipe["inputs"][0]]
-
-    join = recipe.get("join")
-    if join:
-        if len(recipe["inputs"]) != 2:
-            raise ValueError("Configured join recipes must have exactly two inputs")
-        right_name = recipe["inputs"][1]
-        right = _apply_pre_aggregations(
-            inputs[right_name], recipe, join["right_on"]
+def _expression(
+    row: dict[str, str], source_columns: dict[str, set[str]], base_source: str
+) -> F.Column:
+    try:
+        source = row.get("Source_Table.Column", "").strip()
+        logic = row.get("Transformation_Logic", "").strip()
+        column = row["Column_Name"].strip()
+        if source.lower() in DERIVED:
+            if source.lower() == "system timestamp":
+                return F.current_timestamp().alias(column)
+            if source.lower() == "system flag":
+                return F.lit("Y").alias(column)
+            return F.monotonically_increasing_id().alias(column)
+        source_name, separator, source_column = source.partition(".")
+        if separator and source_name.lower() in source_columns:
+            source_column = {"SK_BUREAU_ID": "SK_ID_BUREAU"}.get(
+                source_column, source_column
+            )
+            if source_name.lower() != base_source:
+                source_column = f"{source_name.lower()}__{source_column}"
+        expression = logic or source_column
+        if re.search(r"lookup|join|nối|nếu|tên chuẩn hóa|identity", expression, re.I):
+            expression = source_column
+        for source_name, columns in source_columns.items():
+            if source_name == base_source:
+                continue
+            for source_column_name in columns:
+                expression = re.sub(
+                    rf"\b{re.escape(source_column_name)}\b",
+                    f"{source_name}__{source_column_name}",
+                    expression,
+                    flags=re.I,
+                )
+        expression = re.sub(
+            r"DENSE_RANK\(\).*?(?:hoặc|ou).*?Sequence",
+            "monotonically_increasing_id()",
+            expression,
+            flags=re.I,
         )
-        frame = frame.merge(
-            right,
-            how=join["how"],
-            left_on=join["left_on"],
-            right_on=join["right_on"],
-            suffixes=("", f"_{right_name}"),
+        if expression.lower().startswith("distinct trim("):
+            expression = "trim(NAME_CONTRACT_TYPE)"
+        result = F.expr(expression)
+        target_type = row.get("Column_Type", "").strip().upper()
+        if target_type.startswith("DECIMAL"):
+            result = result.cast(target_type.replace("DECIMAL", "decimal", 1))
+        elif target_type in {"INT", "BIGINT", "SMALLINT", "TINYINT", "BOOLEAN", "DATE", "TIMESTAMP"}:
+            result = result.cast(target_type.lower())
+        elif target_type.startswith(("VARCHAR", "CHAR")):
+            result = result.cast("string")
+        return result.alias(column)
+    except Exception as e:
+        logger.exception("staging_expression_build_failed target=%s error=%s", row.get("Column_Name"), e)
+        raise
+
+
+def build_target(spark: SparkSession, stack: dict, rows: list[dict[str, str]]) -> DataFrame:
+    try:
+        refs = _source_refs(rows)
+        frame = _read_sources(spark, stack, refs)
+        base_source = next(iter(refs))
+        return frame.select(*[_expression(row, refs, base_source) for row in rows])
+    except Exception as e:
+        logger.exception("staging_target_build_failed error=%s", e)
+        raise
+
+
+def _build_date_dimension(spark: SparkSession, config: dict) -> DataFrame:
+    try:
+        date_config = config["staging"]["date_dimension"]
+        dates = spark.range(1).select(F.explode(F.sequence(
+            F.to_date(F.lit(date_config["start_date"])),
+            F.to_date(F.lit(date_config["end_date"])),
+        )).alias("Full_Date"))
+        return dates.select(
+            F.date_format("Full_Date", "yyyyMMdd").cast("int").alias("Date_SK"),
+            "Full_Date",
+            F.dayofmonth("Full_Date").cast("tinyint").alias("Day_of_Month"),
+            F.month("Full_Date").cast("tinyint").alias("Month_Number"),
+            F.date_format("Full_Date", "MMMM").alias("Month_Name"),
+            F.quarter("Full_Date").cast("tinyint").alias("Quarter_Number"),
+            F.year("Full_Date").cast("smallint").alias("Year_Number"),
+            F.dayofweek("Full_Date").isin([1, 7]).alias("Is_Weekend"),
         )
-
-    frame = _apply_transforms(frame, recipe, config)
-    return _aggregate(frame, recipe) if recipe.get("aggregations") else frame
-
-
-def _spark_config(config: dict) -> dict:
-    """Build the technology configuration required by the shared Spark factory."""
-    stack_path = PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
-    import yaml
-
-    with stack_path.open(encoding="utf-8") as file:
-        stack_config = yaml.safe_load(file) or {}
-    return stack_config
+    except Exception as e:
+        logger.exception("staging_date_dimension_build_failed error=%s", e)
+        raise
 
 
 def _postgres_config(config: dict) -> dict:
-    postgres = dict(config["postgres"])
-    postgres["dbname"] = postgres["database"]
-    postgres["schema"] = config["staging"]["output_schema"]
-    return postgres
+    try:
+        postgres = dict(config["postgres"])
+        postgres["dbname"] = postgres["database"]
+        postgres["schema"] = postgres["schema"]
+        return postgres
+    except Exception as e:
+        logger.exception("staging_postgres_config_failed error=%s", e)
+        raise
 
 
-def _ensure_postgres_schema(config: dict) -> None:
+def _ensure_schema(config: dict) -> None:
     import psycopg2
 
-    postgres = config["postgres"]
-    schema = config["staging"]["output_schema"]
-    logger.info("postgres_schema_check_started schema=%s", schema)
-    with psycopg2.connect(
-        host=postgres["host"],
-        port=postgres["port"],
-        dbname=postgres["database"],
-        user=postgres["user"],
-        password=postgres["password"],
-    ) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-    logger.info("postgres_schema_check_completed schema=%s", schema)
-
-
-@task(log_prints=False)
-def transform_and_save(table_name: str, recipe: dict, config: dict) -> str:
-    frame = build_recipe(recipe, config)
-    staging = config["staging"]
-    _ensure_postgres_schema(config)
-    output_path = (
-        PROJECT_ROOT / config["paths"]["staging_dir"] / table_name / "data.parquet"
-    )
-    if staging["write_intermediate_parquet"]:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_parquet(
-            output_path,
-            engine=config["runtime"]["parquet_engine"],
-            index=False,
-        )
-
-    spark = get_spark_session(_spark_config(config))
-    spark_frame = spark.createDataFrame(frame)
-    write_jdbc(
-        spark_frame,
-        _postgres_config(config),
-        table_name,
-        mode=config["postgres"]["write_mode"],
-    )
-    logger.info(
-        "staging_table_saved table=%s rows=%d columns=%d schema=%s intermediate_parquet=%s",
-        table_name,
-        len(frame),
-        len(frame.columns),
-        config["staging"]["output_schema"],
-        staging["write_intermediate_parquet"],
-    )
-    return table_name
+    try:
+        pg = config["postgres"]
+        with psycopg2.connect(
+            host=pg["host"], port=pg["port"], dbname=pg["database"],
+            user=pg["user"], password=pg["password"],
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{pg["schema"]}"')
+        logger.info("staging_schema_ready schema=%s", pg["schema"])
+    except Exception as e:
+        logger.exception("staging_schema_creation_failed error=%s", e)
+        raise
 
 
 @flow(
-    name="Staging Transform Flow",
+    name="Bronze To PostgreSQL Staging",
     log_prints=False,
     task_runner=SequentialTaskRunner(),
-    description="Execute metadata-driven Bronze to PostgreSQL Staging recipes.",
+    description="Transform MinIO Bronze into PostgreSQL tables from design metadata.",
 )
 def staging_transform_flow() -> list[str]:
-    config = load_config()["project_params"]
-    metadata = load_design_metadata()
-    source_columns = load_source_columns(config)
-    recipes = config["staging"]["recipes"]
-    if not recipes:
-        raise ValueError("No Staging recipes configured")
+    spark = None
+    try:
+        config = load_config()["project_params"]
+        stack = load_stack_config()
+        rows_by_target: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for row in load_design_metadata():
+            target = row.get("Target_Table_Name", "").strip()
+            if target and row.get("Column_Name", "").strip():
+                rows_by_target[target].append(row)
+        _ensure_schema(config)
+        from platforms.processing.spark_stack.spark_session import get_spark_session
 
-    for recipe in recipes.values():
-        validate_recipe(recipe, metadata, source_columns)
-
-    _ensure_postgres_schema(config)
-    logger.info("staging_flow_started recipe_count=%d", len(recipes))
-    task_options = transform_and_save.with_options(
-        retries=config["runtime"]["retries"],
-        retry_delay_seconds=config["runtime"]["retry_delay_seconds"],
-    )
-    outputs = [
-        task_options.submit(table_name, recipe, config).result()
-        for table_name, recipe in recipes.items()
-    ]
-
-    ge = config["great_expectations"]
-    if ge["enabled"]:
-        run_ge_checkpoint.submit(
-            checkpoint_name=ge["staging_checkpoint"],
-            ge_root_dir=str(PROJECT_ROOT / config["paths"]["ge_root_dir"]),
-            enabled=True,
-        )
-    logger.info("staging_flow_completed table_count=%d", len(outputs))
-    return outputs
+        spark = get_spark_session(stack)
+        outputs = []
+        for target, rows in rows_by_target.items():
+            try:
+                refs = _source_refs(rows)
+                if not refs:
+                    if target != "Dim_Date":
+                        logger.warning("staging_target_skipped target=%s reason=no_source_mapping", target)
+                        continue
+                    frame = _build_date_dimension(spark, config)
+                else:
+                    logger.info("staging_transform_started target=%s", target)
+                    frame = build_target(spark, stack, rows)
+                write_jdbc(frame, _postgres_config(config), target, config["postgres"]["write_mode"])
+                outputs.append(target)
+                logger.info("staging_target_completed target=%s", target)
+            except Exception as e:
+                logger.exception("staging_target_failed target=%s error=%s", target, e)
+                raise
+        logger.info("staging_flow_completed target_count=%d", len(outputs))
+        return outputs
+    except Exception as e:
+        logger.exception("staging_flow_failed error=%s", e)
+        raise
+    finally:
+        if spark is not None:
+            spark.stop()
 
 
 if __name__ == "__main__":

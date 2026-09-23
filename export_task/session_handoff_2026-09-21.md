@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 
+=======
+>>>>>>> 09a18825ac998a988eb0b043cca184006e39b1d9
 # Session Handoff - Home Credit DataOps Pipeline
 
 Date: 2026-09-21
@@ -517,4 +520,7 @@ cli/flows/serving/staging_flow.py
 
 Do not reset or discard unrelated worktree changes without reviewing them first.
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 09a18825ac998a988eb0b043cca184006e39b1d9

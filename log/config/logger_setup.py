@@ -25,6 +25,10 @@ class JsonFormatter(logging.Formatter):
             "process": record.process,
             "thread": record.threadName,
         }
+        for field in ("run_id", "component", "operation", "table", "source", "target"):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
@@ -63,8 +67,13 @@ class LoggerManager:
         try:
             with open(project_config_path, 'r', encoding='utf-8') as f: # pragma: no cover
                 project_config = yaml.safe_load(f) or {}
-        except Exception as exc: # pragma: no cover
-            raise RuntimeError(f"Failed to load project config for logger: {exc}")
+        except Exception as e: # pragma: no cover
+            logging.getLogger(__name__).exception(
+                "project_logger_config_load_failed path=%s error=%s",
+                project_config_path,
+                e,
+            )
+            raise RuntimeError(f"Failed to load project config for logger: {e}") from e
 
         # Lấy cấu hình logger từ project_params hoặc gốc
         logger_config_section = project_config.get("project_params", {}).get("logger")

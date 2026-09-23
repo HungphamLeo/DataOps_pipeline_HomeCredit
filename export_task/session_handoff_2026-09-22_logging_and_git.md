@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 
+=======
+>>>>>>> 09a18825ac998a988eb0b043cca184006e39b1d9
 # Session Handoff: Production Logging, Pipeline Diagnostics, and Git Branches
 
 **Date:** 2026-09-22  
@@ -258,4 +261,7 @@ Uncommitted changes: 0
    - append/partition semantics for Bronze;
    - Prefect deployment registration versus direct one-shot Compose execution.
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 09a18825ac998a988eb0b043cca184006e39b1d9
