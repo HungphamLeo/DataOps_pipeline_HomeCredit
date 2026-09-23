@@ -1,6 +1,9 @@
 # =============================================================================
 # Python 3.11 runtime dependencies for this project
-# Compatible set for: Prefect 2.14, PySpark 3.5, pandas 2.2
+# Compatible set for: Prefect 2.20, PySpark 3.5, pandas 2.2
+# Dependency chain (từ pip conflict resolution):
+#   prefect 2.20.0 → anyio==4.4.0, httpcore>=1.0.5 → httpx>=0.25.0
+#   asgi-lifespan 2.1.0 → hỗ trợ anyio 4.x
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -28,9 +31,14 @@ minio==7.2.7
 # -----------------------------------------------------------------------------
 # HTTP / network
 # -----------------------------------------------------------------------------
-httpx==0.27.0
+# httpx: prefect 2.20 requires httpcore>=1.0.5 → httpx phải >=0.25.0
+# Pin 0.25.2 là version thấp nhất trong dải đó, ổn định với prefect 2.20
+httpx==0.25.2
+httpcore==1.0.5
 requests==2.32.4
 aiohttp==3.10.11
+# asgi-lifespan 2.1.0: hỗ trợ anyio 4.x, fix TimeoutError khi prefect startup
+asgi-lifespan==2.1.0
 
 # -----------------------------------------------------------------------------
 # Scheduling / timezone compatibility
@@ -38,7 +46,9 @@ aiohttp==3.10.11
 # -----------------------------------------------------------------------------
 croniter<2.0.0,>=1.0.12
 pendulum>=2.1.2,<=3.0
-anyio>=3.7.1,<4
+# anyio: prefect 2.20.0 requires anyio>=4.4.0,<5
+# Pin cứng 4.4.0 — version cao hơn (4.14.x) thay đổi GatherTaskGroup internal API
+anyio==4.4.0
 pytz>=2021.1,<2024
 python-dateutil==2.9.0.post0
 
