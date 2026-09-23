@@ -33,7 +33,7 @@ logger = _pipeline_cfg.serving_logger
 def master_pipeline_flow() -> None:
     """
     Master flow:
-    1. Bronze: Ingest CSV thô → Parquet, phân vùng theo _load_date.
+    1. Bronze: Ingest CSV thô → Delta Lake (MinIO), phân vùng theo _load_date.
     2. Staging: Transform Bronze → target tables trong PostgreSQL schema stg.
     """
     start_ts = time.time()

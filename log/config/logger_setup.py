@@ -196,7 +196,12 @@ class LoggerManager:
                     if isinstance(handler, dict) and "filename" in handler:
                         filename = Path(os.path.expandvars(str(handler["filename"])))
                         if not filename.is_absolute():
-                            filename = Path(__file__).parents[2] / filename
+                            try:
+                                from config import PROJECT_ROOT  # noqa: PLC0415
+                                filename = PROJECT_ROOT / filename
+                            except Exception:
+                                # Fallback: dùng parents[2] nếu config.py chưa có trong sys.path
+                                filename = Path(__file__).parents[2] / filename
                         handler["filename"] = str(filename)
                         _ensure_log_dir(filename)
             return config # pragma: no cover

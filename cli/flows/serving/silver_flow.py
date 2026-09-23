@@ -152,11 +152,13 @@ def build_fact_bureau_monthly_snapshot(spark: SparkSession, stack: dict, pg_cfg:
 
 def build_fact_credit_balance(spark: SparkSession, stack: dict, pg_cfg: dict) -> None:
     _register_bronze_view(spark, stack, "credit_card_balance")
+    _register_bronze_view(spark, stack, "application")   # needed for dim_contract CTE
     _build_and_write(spark, "fact_credit_balance", "Fact_Credit_Balance", pg_cfg)
 
 
 def build_fact_pos_cash_balance(spark: SparkSession, stack: dict, pg_cfg: dict) -> None:
     _register_bronze_view(spark, stack, "pos_cash_balance")
+    _register_bronze_view(spark, stack, "application")   # needed for dim_contract CTE
     _build_and_write(spark, "fact_pos_cash_balance", "Fact_POS_CASH_balance", pg_cfg)
 
 
