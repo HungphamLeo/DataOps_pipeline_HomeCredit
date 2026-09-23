@@ -3,70 +3,40 @@
 from __future__ import annotations
 
 import csv
-import os
-from pathlib import Path
-from typing import Any
 
-import yaml
+from config import (
+    get_design_metadata_path,
+    get_source_dir,
+    load_pipeline_config,
+    load_stack_config,  # noqa: F401 — re-exported for existing callers
+)
 from log.config.logger_setup import logger_manager
 
 logger = logger_manager.get_logger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-CONFIG_PATH = PROJECT_ROOT / "cli" / "config" / "homecredit_config.yaml"
-STACK_CONFIG_PATH = PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
-DEFAULT_DESIGN_PATH = (
-    PROJECT_ROOT / "cli" / "ingestion" / "design_modelling" / "Design modeling_doc.csv"
-)
-
-
-def _expand(value: Any) -> Any:
-    try:
-        if isinstance(value, dict):
-            return {key: _expand(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [_expand(item) for item in value]
-        if isinstance(value, str) and value.startswith("${"):
-            expression = value[2:-1]
-            name, _, default = expression.partition(":-")
-            return os.environ.get(name, default)
-        return value
-    except Exception as e:
-        logger.exception("config_value_expansion_failed error=%s", e)
-        raise
+__all__ = [
+    "load_config",
+    "load_stack_config",
+    "load_design_metadata",
+    "load_source_columns",
+    "validate_recipe",
+]
 
 
 def load_config() -> dict:
+    """Load homecredit_config.yaml via the central config bootstrap."""
     try:
-        with CONFIG_PATH.open(encoding="utf-8") as file:
-            config = _expand(yaml.safe_load(file) or {})
-        logger.info("pipeline_config_loaded path=%s", CONFIG_PATH)
-        return config
+        cfg = load_pipeline_config()
+        logger.info("pipeline_config_loaded")
+        return cfg
     except Exception as e:
-        logger.exception("pipeline_config_load_failed path=%s error=%s", CONFIG_PATH, e)
-        raise
-
-
-def load_stack_config() -> dict:
-    try:
-        with STACK_CONFIG_PATH.open(encoding="utf-8") as file:
-            config = _expand(yaml.safe_load(file) or {})
-        logger.info("stack_config_loaded path=%s", STACK_CONFIG_PATH)
-        return config
-    except Exception as e:
-        logger.exception("stack_config_load_failed path=%s error=%s", STACK_CONFIG_PATH, e)
+        logger.exception("pipeline_config_load_failed error=%s", e)
         raise
 
 
 def load_design_metadata() -> list[dict[str, str]]:
     """Read source-to-target rows from the design contract CSV."""
-    config = load_config().get("project_params", {})
-    configured_path = config.get("paths", {}).get("design_metadata")
-    design_path = (
-        PROJECT_ROOT / configured_path
-        if configured_path
-        else DEFAULT_DESIGN_PATH
-    )
+    design_path = get_design_metadata_path()
     try:
         with design_path.open(encoding="utf-8-sig", newline="") as file:
             next(file, None)
@@ -81,8 +51,8 @@ def load_design_metadata() -> list[dict[str, str]]:
 def load_source_columns(config: dict) -> dict[str, set[str]]:
     """Read source headers so derived recipe inputs can be checked cheaply."""
     try:
-        source_columns = {}
-        source_dir = PROJECT_ROOT / config["paths"]["source_dir"]
+        source_columns: dict[str, set[str]] = {}
+        source_dir = get_source_dir()
         for source in config.get("sources", []):
             source_path = source_dir / source["file"]
             with source_path.open(
@@ -113,13 +83,15 @@ def validate_recipe(
         }
         missing = []
         for mapping in recipe.get("mappings", []):
-            source = mapping.get("source")
-            source_name, _, column_name = source.partition(".") if source else ("", "", "")
+            source: str | None = mapping.get("source")
+            if not source:
+                continue
+            source_name, _, column_name = source.partition(".")
+            sc = source_columns or {}
             exists_in_source = (
-                source_name in (source_columns or {})
-                and column_name in source_columns[source_name]
+                source_name in sc and column_name in sc[source_name]
             )
-            if source and source not in sources and not exists_in_source:
+            if source not in sources and not exists_in_source:
                 missing.append(source)
         if missing:
             raise ValueError(

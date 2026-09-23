@@ -2,19 +2,19 @@
 Spark session factory for Delta Lake + MinIO (S3A) workloads.
 
 Usage:
-    from processing.spark_stack.spark_session import get_spark_session
-    import yaml
+    from platforms.processing.spark_stack.spark_session import get_spark_session
+    from config import load_stack_config
 
-    with open("prefect_orchestra/config/pipeline_config.yaml") as f:
-        config = yaml.safe_load(f)
-
-    spark = get_spark_session(config)
+    spark = get_spark_session(load_stack_config())
 """
-from pyspark.sql import SparkSession
 import os
+
+from pyspark.sql import SparkSession
+
 from log.config.logger_setup import logger_manager
 
 logger = logger_manager.get_logger(__name__)
+
 
 def get_spark_session(config: dict) -> SparkSession:
     """

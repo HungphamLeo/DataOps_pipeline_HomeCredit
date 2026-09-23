@@ -1,7 +1,16 @@
+-- Dim_Application_Status: Junk dimension từ previous_application
+-- Input temp view : bronze_previous_application
+-- Output          : Dim_Application_Status
 
--- 2. Junk Dimension Trạng thái & Lý do xét duyệt đơn vay
-CREATE TABLE Dim_Application_Status (
-    Status_SK           INT PRIMARY KEY,
-    Contract_Status     VARCHAR(50) NOT NULL,         -- Approved, Refused, Canceled, Unused
-    Reject_Reason       VARCHAR(100) NOT NULL         -- LIMIT, SCOT, XAP...
-);
+SELECT
+    CAST(dense_rank() OVER (ORDER BY Contract_Status, Reject_Reason) AS INT) AS Status_SK,
+    Contract_Status,
+    Reject_Reason
+FROM (
+    SELECT DISTINCT
+        COALESCE(TRIM(NAME_CONTRACT_STATUS), 'Unknown') AS Contract_Status,
+        COALESCE(TRIM(CODE_REJECT_REASON),   'XAP')     AS Reject_Reason
+    FROM bronze_previous_application
+    WHERE NAME_CONTRACT_STATUS IS NOT NULL
+       OR CODE_REJECT_REASON   IS NOT NULL
+) distinct_statuses

@@ -45,7 +45,17 @@ class LoggerManager:
         return cls._instance
 
     def __init__(self, config_path: Optional[str] = None):
-        self.config_path = Path(config_path) if config_path else Path(__file__).with_name("logger_config.yaml")
+        if config_path:
+            self.config_path = Path(config_path)
+        else:
+            # Resolve via central config bootstrap if available; fall back to
+            # sibling logger_config.yaml so the module stays importable before
+            # config.py is on sys.path (e.g. during pytest collection).
+            try:
+                from config import get_logger_config_path  # noqa: PLC0415
+                self.config_path = get_logger_config_path()
+            except Exception:
+                self.config_path = Path(__file__).with_name("logger_config.yaml")
         self.config: Dict[str, Any] = {}
         self._initialized = False
         if config_path is not None:
@@ -191,36 +201,27 @@ class LoggerManager:
                         _ensure_log_dir(filename)
             return config # pragma: no cover
         except FileNotFoundError:
-            # Fallback config mặc định
+            # Minimal console-only fallback — không hardcode file path
             return {
                 "version": 1,
                 "disable_existing_loggers": False,
                 "formatters": {
                     "default": {
-                        "format": '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        "datefmt": "%Y-%m-%dT%H:%M:%S"
+                        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                        "datefmt": "%Y-%m-%dT%H:%M:%S",
                     }
                 },
                 "handlers": {
                     "console": {
                         "class": "logging.StreamHandler",
                         "formatter": "default",
-                        "level": "INFO"
-                    },
-                    "file_debug": {
-                        "class": "logging.handlers.RotatingFileHandler",
-                        "filename": Path(__file__).parent / "logs" / "debug.log",
-                        "maxBytes": 10 * 1024 * 1024,
-                        "backupCount": 3,
-                        "formatter": "default",
-                        "level": "DEBUG"
-                    },
-                    # Thêm handlers cho info, warning, error tương tự
+                        "level": "INFO",
+                    }
                 },
                 "root": {
                     "level": "INFO",
-                    "handlers": ["console", "file_debug"]
-                }
+                    "handlers": ["console"],
+                },
             }
 
     def _configure_logging(self):

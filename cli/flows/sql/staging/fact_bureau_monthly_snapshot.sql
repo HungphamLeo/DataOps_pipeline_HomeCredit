@@ -1,9 +1,25 @@
+-- Fact_Bureau_Monthly_Snapshot: từ bureau_balance
+-- Input temp view : bronze_bureau_balance
+-- Output          : Fact_Bureau_Monthly_Snapshot
+--
+-- MONTHS_BALANCE là số âm tương đối (-1 = tháng trước, -2 = 2 tháng trước...).
+-- Quy đổi về ngày cuối tháng: add_months(current_date, MONTHS_BALANCE) → last_day → YYYYMMDD
 
--- 4. Fact Trạng thái nợ CIC định kỳ theo tháng (Periodic Snapshot Fact)
-CREATE TABLE Fact_Bureau_Monthly_Snapshot (
-    Bureau_Snapshot_SK  BIGINT PRIMARY KEY,
-    Month_Date_SK       INT NOT NULL REFERENCES Dim_Date(Date_SK),
-    Bureau_ID           VARCHAR(50) NOT NULL,          -- Degenerate Dim nối về Fact_Bureau_Credit
-    STATUS_CODE         CHAR(2) NOT NULL,              -- C, 0, 1, 2, 3, 4, 5
-    MONTHS_BALANCE      SMALLINT NOT NULL
-);
+SELECT
+    -- Surrogate Key
+    abs(hash(concat_ws('_',
+        CAST(SK_BUREAU_ID    AS STRING),
+        CAST(MONTHS_BALANCE  AS STRING)
+    )))                                                                         AS Bureau_Snapshot_SK,
+
+    -- FK → Dim_Date (tháng báo cáo — cuối tháng)
+    COALESCE(
+        CAST(date_format(last_day(add_months(current_date(), CAST(MONTHS_BALANCE AS INT))), 'yyyyMMdd') AS INT),
+        -1
+    )                                                                           AS Month_Date_SK,
+
+    CAST(SK_BUREAU_ID AS STRING)                                                AS Bureau_ID,
+    COALESCE(TRIM(STATUS), 'X')                                                 AS STATUS_CODE,
+    CAST(MONTHS_BALANCE AS SMALLINT)                                            AS MONTHS_BALANCE
+
+FROM bronze_bureau_balance

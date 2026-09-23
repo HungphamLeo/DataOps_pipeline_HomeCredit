@@ -2,18 +2,23 @@
 CLI entry point cho Home Credit DataOps Pipeline.
 
 Chạy:
-    python cli/main.py
+    python -m cli.main          # từ project root
+    python cli/main.py          # từ project root
 """
 import sys
 from pathlib import Path
-from log.config.logger_setup import logger_manager
-from cli.flows import master_pipeline_flow
-# Đảm bảo project root có trong sys.path cho các package nội bộ.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-logger_manager.configure(str(PROJECT_ROOT / "log" / "config" / "logger_config.yaml"))
+# Đảm bảo project root có trong sys.path trước mọi import nội bộ.
+# Anchor theo file này — không dùng parents[n] dễ lỗi theo depth.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config import get_logger_config_path          # noqa: E402
+from log.config.logger_setup import logger_manager # noqa: E402
+from cli.flows import master_pipeline_flow          # noqa: E402
+
+logger_manager.configure(str(get_logger_config_path()))
 logger = logger_manager.get_logger(__name__)
 
 

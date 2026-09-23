@@ -34,12 +34,15 @@ build/
 logs/**/*.log
 logs/**/*.log.*
 
+homecredit_config.yaml
+stack.yml
+docker-compose.yml
 # =============================================================================
 # KHÔNG ignore các loại file quan trọng sau:
-*.yaml
-*.yml
-*.csv
-*.ipynb
+# *.yaml
+# *.yml
+# *.csv
+# *.ipynb
 # *.txt          -> requirements.txt
 # *.json         -> package.json, schemas, fixtures
 # *.md           -> docs, export_task reports

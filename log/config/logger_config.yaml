@@ -1,0 +1,143 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  console:
+    format: "%(asctime)s %(levelname)s %(name)s %(message)s"
+    datefmt: "%Y-%m-%dT%H:%M:%S%z"
+  json:
+    (): log.config.logger_setup.JsonFormatter
+    datefmt: "%Y-%m-%dT%H:%M:%S%z"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: console
+    stream: ext://sys.stdout
+  application_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/pipeline.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: json
+    filename: log/log_storage/pipeline-error.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  cli_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/cli.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  platform_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/platforms.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  processing_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/processing.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  storage_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/storage.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  orchestration_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/orchestration.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  spark_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/spark.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  minio_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/minio.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+  postgres_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: log/log_storage/postgres.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+
+root:
+  level: INFO
+  handlers: [console, application_file, error_file]
+
+loggers:
+  cli:
+    level: INFO
+    handlers: [console, cli_file, error_file]
+    propagate: false
+  homecredit:
+    level: INFO
+    handlers: [console, application_file, error_file]
+    propagate: false
+  platforms:
+    level: INFO
+    handlers: [console, platform_file, error_file]
+    propagate: false
+  platforms.processing:
+    level: INFO
+    handlers: [console, processing_file, error_file]
+    propagate: false
+  platforms.storage:
+    level: INFO
+    handlers: [console, storage_file, error_file]
+    propagate: false
+  platforms.prefect_orchestra:
+    level: INFO
+    handlers: [console, orchestration_file, error_file]
+    propagate: false
+  platforms.processing.spark_stack:
+    level: INFO
+    handlers: [console, spark_file, error_file]
+    propagate: false
+  platforms.processing.config:
+    level: INFO
+    handlers: [console, processing_file, error_file]
+    propagate: false
+  platforms.storage.minio:
+    level: INFO
+    handlers: [console, minio_file, error_file]
+    propagate: false
+  platforms.storage.postgre:
+    level: INFO
+    handlers: [console, postgres_file, error_file]
+    propagate: false

@@ -1,17 +1,18 @@
+-- Dim_Customer: SCD Type 2 — full refresh (initial load, Is_Current_Flag = 'Y' for all)
+-- Input temp view : bronze_application
+-- Output          : Dim_Customer
 
--- 4. Dimension Khách hàng (Hỗ trợ SCD Type 2)
-CREATE TABLE Dim_Customer (
-    Customer_SK          BIGINT PRIMARY KEY,          -- Khóa đại diện thay thế (Surrogate Key)
-    Customer_BK          VARCHAR(50) NOT NULL,        -- Khóa tự nhiên từ nguồn (SK_ID_CURR)
-    DAYS_BIRTH           INT NULL,
-    CODE_GENDER          VARCHAR(10) NOT NULL,
-    NAME_FAMILY_STATUS   VARCHAR(50) NOT NULL,        -- SCD2
-    NAME_EDUCATION_TYPE  VARCHAR(100) NOT NULL,       -- SCD2
-    REGION_RATING_CLIENT SMALLINT NULL,               -- SCD2
-    AMT_INCOME_TOTAL     DECIMAL(18, 2) NULL,         -- SCD2
-    DAYS_EMPLOYED        INT NULL,                    -- SCD2
-    Effective_Date       TIMESTAMP NOT NULL,          -- Ngày bắt đầu hiệu lực bản ghi SCD2
-    Expiry_Date          TIMESTAMP NOT NULL,          -- Ngày hết hiệu lực (mặc định 9999-12-31)
-    Is_Current_Flag      CHAR(1) NOT NULL             -- 'Y' nếu là bản ghi mới nhất, 'N' nếu là lịch sử
-);
-
+SELECT
+    monotonically_increasing_id()                                      AS Customer_SK,
+    CAST(SK_ID_CURR AS STRING)                                         AS Customer_BK,
+    CAST(DAYS_BIRTH AS INT)                                            AS DAYS_BIRTH,
+    COALESCE(UPPER(TRIM(CODE_GENDER)),        'XNA')                   AS CODE_GENDER,
+    COALESCE(TRIM(NAME_FAMILY_STATUS),        'Unknown')               AS NAME_FAMILY_STATUS,
+    COALESCE(TRIM(NAME_EDUCATION_TYPE),       'Unknown')               AS NAME_EDUCATION_TYPE,
+    CAST(REGION_RATING_CLIENT AS SMALLINT)                             AS REGION_RATING_CLIENT,
+    ROUND(CAST(AMT_INCOME_TOTAL AS DECIMAL(18,2)), 2)                  AS AMT_INCOME_TOTAL,
+    CAST(DAYS_EMPLOYED AS INT)                                         AS DAYS_EMPLOYED,
+    current_timestamp()                                                AS Effective_Date,
+    CAST('9999-12-31 23:59:59' AS TIMESTAMP)                           AS Expiry_Date,
+    'Y'                                                                AS Is_Current_Flag
+FROM bronze_application
