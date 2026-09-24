@@ -81,7 +81,7 @@ def get_stack_config_path() -> Path:
     if raw:
         p = Path(raw)
         return p if p.is_absolute() else PROJECT_ROOT / p
-    return PROJECT_ROOT / "platforms" / "config" / "stack.yml"
+    return PROJECT_ROOT / "platforms" / "config" / "stack.yaml"
 
 
 def get_logger_config_path() -> Path:
