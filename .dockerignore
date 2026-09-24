@@ -1,0 +1,13 @@
+.git
+.github
+.ai_workspace
+.copilot
+.env
+homecredit__env
+venv
+.venv
+__pycache__
+*.pyc
+data
+log/log_storage/*.log
+*.xlsx
