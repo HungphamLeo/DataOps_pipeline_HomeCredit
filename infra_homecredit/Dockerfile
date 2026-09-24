@@ -1,5 +1,5 @@
-# Bookworm provides Java 17, which is supported by PySpark 3.5.x.
-FROM python:3.11-slim-bookworm
+# Pin bookworm cứng để tránh Docker Hub re-tag sang Trixie (Debian 13 đã drop openjdk-17).
+FROM python:3.11.13-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
