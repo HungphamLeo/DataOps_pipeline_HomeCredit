@@ -48,6 +48,12 @@ def get_spark_session(config: dict) -> SparkSession:
         if isinstance(packages, list):
             packages = ",".join(packages)
 
+        # local[*] chỉ dùng driver_memory — executor_memory bị ignore.
+        # sql.shuffle.partitions nhỏ hơn default(200) để mỗi partition fit RAM.
+        # maxRecordsPerFile giới hạn kích thước mỗi Parquet part file → tránh OOM khi write.
+        shuffle_partitions = str(spark_cfg.get("shuffle_partitions", 8))
+        max_records = str(spark_cfg.get("max_records_per_file", 500_000))
+
         builder = (
             SparkSession.builder
             .appName(spark_cfg["app_name"])
@@ -76,6 +82,14 @@ def get_spark_session(config: dict) -> SparkSession:
             )
             .config("spark.driver.memory", spark_cfg.get("driver_memory", "4g"))
             .config("spark.executor.memory", spark_cfg.get("executor_memory", "4g"))
+            # Tránh OOM khi xử lý bảng lớn (bureau_balance ~27M, installments ~13M)
+            .config("spark.sql.shuffle.partitions", shuffle_partitions)
+            .config("spark.sql.files.maxRecordsPerFile", max_records)
+            .config("spark.sql.adaptive.enabled", "true")
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+            # Spill to disk thay vì OOM khi memory pressure cao
+            .config("spark.memory.fraction", "0.6")
+            .config("spark.memory.storageFraction", "0.3")
         )
         spark = builder.getOrCreate()
         spark.sparkContext.setLogLevel("WARN")

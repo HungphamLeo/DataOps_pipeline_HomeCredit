@@ -11,8 +11,17 @@ minio:
 spark:
   app_name: homecredit-bronze-silver
   master: ${SPARK_MASTER:-local[*]}
-  driver_memory: ${SPARK_DRIVER_MEMORY:-4g}
-  executor_memory: ${SPARK_EXECUTOR_MEMORY:-4g}
+  # local[*]: chỉ driver_memory có hiệu lực (executor_memory bị ignore trong local mode)
+  # Nếu máy < 8g RAM: set SPARK_DRIVER_MEMORY=2g trong .env
+  driver_memory: ${SPARK_DRIVER_MEMORY:-3g}
+  executor_memory: ${SPARK_EXECUTOR_MEMORY:-3g}
+  # Số shuffle partitions — default Spark là 200 (quá nhiều cho local, gây overhead)
+  # 8 partitions phù hợp với local[*] 4-8 cores, mỗi partition ~3-4M rows của bureau_balance
+  shuffle_partitions: ${SPARK_SHUFFLE_PARTITIONS:-8}
+  # Giới hạn record mỗi part file — tránh tạo file Parquet quá lớn gây OOM khi write
+  max_records_per_file: ${SPARK_MAX_RECORDS_PER_FILE:-500000}
+  # Delta Lake SQL extensions — bắt buộc để dùng MERGE, OPTIMIZE, TIME TRAVEL
+  sql_extensions: io.delta.sql.DeltaSparkSessionExtension
   packages:
     - io.delta:delta-spark_2.12:3.1.0
     - org.apache.hadoop:hadoop-aws:3.3.4
