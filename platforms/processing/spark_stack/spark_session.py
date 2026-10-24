@@ -52,7 +52,7 @@ def get_spark_session(config: dict) -> SparkSession:
         # sql.shuffle.partitions nhỏ hơn default(200) để mỗi partition fit RAM.
         # maxRecordsPerFile giới hạn kích thước mỗi Parquet part file → tránh OOM khi write.
         shuffle_partitions = str(spark_cfg.get("shuffle_partitions", 8))
-        max_records = str(spark_cfg.get("max_records_per_file", 500_000))
+        max_records = str(spark_cfg.get("max_records_per_file", 300000))
 
         builder = (
             SparkSession.builder

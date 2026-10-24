@@ -8,7 +8,7 @@
 SELECT
     -- Surrogate Key
     abs(hash(concat_ws('_',
-        CAST(SK_BUREAU_ID    AS STRING),
+        CAST(SK_ID_BUREAU    AS STRING),
         CAST(MONTHS_BALANCE  AS STRING)
     )))                                                                         AS Bureau_Snapshot_SK,
 
@@ -18,7 +18,7 @@ SELECT
         -1
     )                                                                           AS Month_Date_SK,
 
-    CAST(SK_BUREAU_ID AS STRING)                                                AS Bureau_ID,
+    CAST(SK_ID_BUREAU AS STRING)                                                AS Bureau_ID,
     COALESCE(TRIM(STATUS), 'X')                                                 AS STATUS_CODE,
     CAST(MONTHS_BALANCE AS SMALLINT)                                            AS MONTHS_BALANCE
 
