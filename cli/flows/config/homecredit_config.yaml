@@ -24,6 +24,36 @@ project_params:
       - sample_submission.csv
       - HomeCredit_columns_description.csv
     infer_schema: true
+  # Home Credit dataset — domain-specific configuration
+# Owned by: cli/flows (ingestion domain)
+  bronze_maintenance:
+    retention_hours: 168   # 7 ngày — business SLA
+    tables:
+      application:
+        zorder_col: SK_ID_CURR
+      bureau:
+        zorder_col: SK_ID_CURR
+      bureau_balance:
+        zorder_col: SK_ID_BUREAU
+      previous_application:
+        zorder_col: SK_ID_CURR
+      installments_payments:
+        zorder_col: SK_ID_PREV
+      pos_cash_balance:
+        zorder_col: SK_ID_PREV
+      credit_card_balance:
+        zorder_col: SK_ID_PREV
+  pii_security:
+    enabled: true
+    tables:
+      application_train:
+        encrypted_columns:
+          - "AMT_INCOME_TOTAL"
+          - "DAYS_BIRTH"
+      application_test:
+        encrypted_columns:
+          - "AMT_INCOME_TOTAL"
+          - "DAYS_BIRTH"
   staging:
     write_mode: overwrite
     date_dimension:

@@ -25,7 +25,8 @@ class JsonFormatter(logging.Formatter):
             "process": record.process,
             "thread": record.threadName,
         }
-        for field in ("run_id", "component", "operation", "table", "source", "target"):
+        for field in ("run_id", "step", "records_count", "duration_seconds",
+              "component", "operation", "table", "source", "target"):
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = value

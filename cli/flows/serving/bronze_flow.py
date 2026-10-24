@@ -17,12 +17,31 @@ from pyspark.sql import DataFrame, SparkSession, functions as F
 from cli.flows.serving.metadata import load_config, load_stack_config
 from config import get_source_dir
 from platforms.prefect_orchestra.prefect_main import PrefectETLPipelineConfig
-from platforms.processing.config.delta_utils import add_bronze_metadata, write_delta_partitioned
+from platforms.config.delta_utils import add_bronze_metadata, write_delta_partitioned
 from platforms.processing.spark_stack.spark_session import get_spark_session
+from cli.flows.serving.dq_validator import validate_bronze
+from platforms.security.pii_encryptor import encrypt_pii_vectorized
 
 _pipeline_cfg = PrefectETLPipelineConfig()
 logger = _pipeline_cfg.bronze_logger
 
+
+def apply_pii_protection(df: DataFrame, table_name: str) -> DataFrame:
+    """Áp dụng mã hóa cho các cột PII được định nghĩa trong config."""
+    cfg = load_config()
+    pii_cfg = cfg.get("pii_security", {})
+    
+    if not pii_cfg.get("enabled", False):
+        return df
+
+    table_pii = pii_cfg.get("tables", {}).get(table_name, {})
+    cols_to_encrypt = table_pii.get("encrypted_columns", [])
+
+    for col_name in cols_to_encrypt:
+        if col_name in df.columns:
+            df = df.withColumn(col_name, encrypt_pii_vectorized(df[col_name].cast("string")))
+
+    return df
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -60,6 +79,7 @@ def load_application(spark: SparkSession, config: dict, stack: dict, load_date: 
     src = get_source_dir() / "application.csv"
     logger.info("bronze_load_started table=application")
     df = _load_csv(spark, src, config)
+    df = validate_bronze(df, "application", spark)
     out = _write_bronze(df, stack, "application", load_date)
     logger.info("bronze_load_completed table=application path=%s rows=%d", out, df.count())
     return out

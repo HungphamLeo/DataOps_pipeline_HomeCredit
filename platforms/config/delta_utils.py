@@ -8,9 +8,14 @@ Provides:
 - write_delta               — full-overwrite write (Staging)
 - write_jdbc                — write to PostgreSQL via JDBC (Silver/Mart)
 - run_sql_transform         — execute a SQL file with Spark
+- optimize_delta_table      — inline fire-and-forget OPTIMIZE after large writes
+- optimize_and_vacuum_table — full OPTIMIZE + VACUUM for scheduled maintenance jobs
+- maintain_all_bronze_tables — iterate all Bronze tables from config and maintain each
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import current_timestamp, lit, to_date
+from typing import Optional
+from delta.tables import DeltaTable
 from log.config.logger_setup import logger_manager
 
 logger = logger_manager.get_logger(__name__)
@@ -162,3 +167,104 @@ def run_sql_transform(spark: SparkSession, sql_path: str) -> DataFrame:
     except Exception as e:
         logger.exception("spark_sql_transform_failed sql_path=%s error=%s", sql_path, e)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Inline optimization helper (fire-and-forget — does NOT raise on failure)
+# ---------------------------------------------------------------------------
+
+def optimize_delta_table(spark: SparkSession, path: str, zorder_col: Optional[str] = None) -> None:
+    """
+    Inline OPTIMIZE sau khi ghi dữ liệu lớn.
+
+    Dùng ngay sau write_delta_partitioned() / write_delta() để compact small files.
+    Không raise exception — pipeline tiếp tục dù OPTIMIZE fail (best-effort).
+    Khác với optimize_and_vacuum_table() bên dưới: không chạy VACUUM và không raise.
+    """
+    try:
+        delta_table = DeltaTable.forPath(spark, path)
+        if zorder_col:
+            delta_table.optimize().executeZOrderBy(zorder_col)
+        else:
+            delta_table.optimize().executeCompaction()
+    except Exception as e:
+        logger.warning("optimize_delta_table_skipped path=%s error=%s", path, e)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled maintenance — OPTIMIZE + VACUUM (raises on failure)
+# ---------------------------------------------------------------------------
+
+def optimize_and_vacuum_table(
+    spark: SparkSession,
+    table_path: str,
+    zorder_col: Optional[str] = None,
+    retention_hours: float = 168.0,
+) -> None:
+    """
+    Chạy OPTIMIZE (Z-Order Compaction) và VACUUM cho một bảng Delta.
+    
+    Parameters
+    ----------
+    table_path : str
+        Đường dẫn S3A tới Delta table (e.g. s3a://lakehouse/bronze/bureau_balance)
+    zorder_col : Optional[str]
+        Cột dùng để sắp xếp đa chiều Z-ORDER (tăng tốc độ lọc Predicate Pushdown)
+    retention_hours : float
+        Số giờ lưu lại snapshot cũ (mặc định 168 giờ = 7 ngày)
+    """
+    try:
+        logger.info("delta_maintenance_start path=%s zorder=%s", table_path, zorder_col)
+        delta_table = DeltaTable.forPath(spark, table_path)
+
+        # 1. OPTIMIZE
+        if zorder_col:
+            logger.info("running_zorder_optimize col=%s", zorder_col)
+            delta_table.optimize().executeZOrderBy(zorder_col)
+        else:
+            logger.info("running_standard_compaction")
+            delta_table.optimize().executeCompaction()
+
+        # 2. VACUUM
+        logger.info("running_vacuum retention_hours=%s", retention_hours)
+        delta_table.vacuum(retention_hours)
+
+        logger.info("delta_maintenance_success path=%s", table_path)
+    except Exception as e:
+        logger.exception("delta_maintenance_failed path=%s error=%s", table_path, e)
+        raise
+
+
+def maintain_all_bronze_tables(
+    spark: SparkSession,
+    bucket: str,
+    prefix: str,
+    tables_cfg: dict,
+    retention_hours: float = 168.0,
+) -> None:
+    """
+    Bảo trì toàn bộ Bronze Delta tables: OPTIMIZE (Z-ORDER) + VACUUM.
+
+    tables_cfg được truyền từ caller (cli/flows/config/homecredit_config.yaml).
+    Mỗi bảng chạy độc lập — 1 bảng fail không block các bảng còn lại (best-effort).
+
+    Parameters
+    ----------
+    bucket : str
+        MinIO/S3 bucket name (từ stack["minio"]["bucket"]).
+    prefix : str
+        Bronze prefix path (từ stack["minio"]["bronze_prefix"]).
+    tables_cfg : dict
+        Dict dạng {table_name: {zorder_col: ...}} — đọc từ homecredit_config.yaml.
+    retention_hours : float
+        Số giờ lưu snapshot cũ trước khi VACUUM dọn (mặc định 168h = 7 ngày).
+    """
+    for table_name, opts in tables_cfg.items():
+        try:
+            zorder_col = opts.get("zorder_col")
+            table_path = f"s3a://{bucket}/{prefix}/{table_name}"
+            optimize_and_vacuum_table(spark, table_path, zorder_col, retention_hours)
+        except Exception as e:
+            logger.warning(
+                "maintenance_skipped table=%s error=%s", table_name, e
+            )
