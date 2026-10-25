@@ -1,388 +1,219 @@
-# HomeCredit DataOps Pipeline
+# 🏦 Home Credit Enterprise DataOps Pipeline
 
-Dự án DataOps pipeline xây dựng hệ thống Medallion Architecture (Bronze → Silver) trên nền tảng PySpark, Delta Lake, MinIO, PostgreSQL và Prefect — containerised hoàn toàn bằng Docker Compose.
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+[![PySpark 3.5.1](https://img.shields.io/badge/pyspark-3.5.1-orange.svg)](https://spark.apache.org/)
+[![Delta Lake 3.1.0](https://img.shields.io/badge/Delta_Lake-3.1.0-blueviolet.svg)](https://delta.io/)
+[![Prefect 2.20](https://img.shields.io/badge/prefect-2.20-blue.svg)](https://www.prefect.io/)
+[![Code Style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
----
-
-## Mục lục
-
-1. [Tổng quan kiến trúc](#1-tổng-quan-kiến-trúc)
-2. [Tech stack](#2-tech-stack)
-3. [Cấu trúc thư mục](#3-cấu-trúc-thư-mục)
-4. [Yêu cầu môi trường](#4-yêu-cầu-môi-trường)
-5. [Cài đặt & Cấu hình](#5-cài-đặt--cấu-hình)
-6. [Chạy pipeline](#6-chạy-pipeline)
-7. [Theo dõi & Kiểm tra kết quả](#7-theo-dõi--kiểm-tra-kết-quả)
-8. [Luồng dữ liệu chi tiết](#8-luồng-dữ-liệu-chi-tiết)
-9. [Tuning & Vận hành](#9-tuning--vận-hành)
-10. [Troubleshooting](#10-troubleshooting)
+Hệ thống DataOps Lakehouse kiến trúc **Medallion (Bronze → Staging/Silver)** xử lý dataset tín dụng ngân hàng Home Credit (~30M+ records) với **Data Quality Gates (Pandera)**, **Tối ưu hóa lưu trữ Delta Lake (Z-ORDER & VACUUM)**, **Bảo mật PII Crypto-Shredding (AES-256-GCM)** và điều phối bởi **Prefect Orchestrator**.
 
 ---
 
-## 1. Tổng quan kiến trúc
+## 📑 Mục lục
 
+1. [Tổng quan Kiến trúc](#1-tổng-quan-kiến-trúc)
+2. [Các Tính Năng Cốt Lõi (Features)](#2-các-tính-năng-cốt-lõi-features)
+3. [Tech Stack](#3-tech-stack)
+4. [Cấu trúc Thư mục Dự án](#4-cấu-trúc-thư-mục-dự-án)
+5. [Chuẩn Bị Dữ Liệu & Môi Trường](#5-chuẩn-bị-dữ-liệu--môi-trường)
+6. [Hướng Dẫn Khởi Chạy (Docker & WSL)](#6-hướng-dẫn-khởi-chạy-docker--wsl)
+7. [Kiểm Thử & Đảm Bảo Chất Lượng (Quality Gates)](#7-kiểm-thử--đảm-bảo-chất-lượng-quality-gates)
+8. [Vận Hành & Bảo Trì Delta Lake](#8-vận-hành--bảo-trì-delta-lake)
+9. [Xử Lý Sự Cố Thường Gặp (Troubleshooting)](#9-xử-lý-sự-cố-thường-gặp-troubleshooting)
+
+---
+
+## 1. Tổng quan Kiến trúc
+
+```mermaid
+flowchart TD
+    subgraph Ingestion ["1. Data Ingestion & Quality Gates"]
+        RawCSV[Raw CSV Data<br/>~30M+ rows] --> PandasContract[Pandera Contract Check<br/>application_contract.py]
+        PandasContract -->|Critical Fail| CircuitBreaker[🚨 Circuit Breaker: Halt Pipeline]
+        PandasContract -->|Warning Rows| DLQ[(MinIO Quarantine DLQ<br/>s3a://lakehouse/quarantine/)]
+        PandasContract -->|Clean Rows| PIIEncrypt[Vectorized PII Encryption<br/>AES-256-GCM]
+    end
+
+    subgraph BronzeLayer ["2. Bronze Layer (Delta Lake on MinIO)"]
+        PIIEncrypt --> SparkBronze[PySpark Ingest + AQE]
+        SparkBronze --> BronzeDelta[(MinIO S3A Delta Lake<br/>Partitioned by _load_date)]
+        BronzeDelta --> MaintenanceFlow[Prefect Weekly Maintenance<br/>OPTIMIZE Z-ORDER + VACUUM]
+    end
+
+    subgraph SilverLayer ["3. Staging / Silver Layer (Dimensional Modeling)"]
+        BronzeDelta --> SparkSQL[Spark SQL Engine<br/>10 Dimensional Models]
+        SparkSQL --> PostgresJDBC[PostgreSQL JDBC Writer<br/>Batch Insert / Type Casting]
+        PostgresJDBC --> PostgresDW[(PostgreSQL Data Warehouse<br/>Schema: stg)]
+    end
+
+    subgraph Observability ["4. Observability & Alerting"]
+        SparkBronze & SparkSQL -.-> JSONLog[Structured JSON Logging]
+        CircuitBreaker -.-> Webhook[Slack / Telegram Failure Webhook]
+    end
 ```
-Source CSV files
-    │
-    ▼
-┌──────────────────────────────────────────────────────────┐
-│  BRONZE LAYER  (Prefect @flow — bronze_ingest_flow)      │
-│                                                          │
-│  CSV  ──►  PySpark  ──►  Delta Lake  ──►  MinIO          │
-│           (infer schema,    (ACID,          (S3A          │
-│            add metadata)    partitioned      object       │
-│                             by _load_date)   storage)     │
-└──────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────┐
-│  SILVER LAYER  (Prefect @flow — silver_transform_flow)   │
-│                                                          │
-│  Delta Lake  ──►  Spark SQL (.sql files)  ──►  PostgreSQL│
-│  (Bronze views    (Dimensional modeling,     schema: stg │
-│   temp views)      Kimball Star Schema)                  │
-└──────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────┐
-│  SERVING LAYER  (PostgreSQL schema: stg)                 │
-│                                                          │
-│  Dim_Date         Dim_Customer        Dim_Contract_Type  │
-│  Dim_AppStatus    Fact_LoanApp        Fact_LoanRepayment │
-│  Fact_BureauCredit   Fact_BureauMonthly                  │
-│  Fact_CreditBalance  Fact_POSCashBalance                 │
-└──────────────────────────────────────────────────────────┘
-```
 
 ---
 
-## 2. Tech stack
+## 2. Các Tính Năng Cốt Lõi (Features)
 
-| Thành phần | Công nghệ | Phiên bản | Vai trò |
-|---|---|---|---|
-| **Orchestration** | Prefect | 2.20.0 | Pipeline scheduling, flow tracking |
-| **Processing** | PySpark | 3.5.1 | Distributed data transformation |
-| **Table Format** | Delta Lake | 3.1.0 | ACID transactions, time travel |
-| **Object Storage** | MinIO | latest | S3-compatible Bronze data lake |
-| **Data Warehouse** | PostgreSQL | 14 | Silver/Serving layer |
-| **Containerization** | Docker Compose | 3.9 | Toàn bộ stack chạy trên 1 máy |
-| **Config** | python-dotenv + PyYAML | — | 12-Factor App config management |
-| **Logging** | structlog + colorlog | — | Structured JSON logs |
+* **⚡ Production Spark Tuning (ST05):** Kích hoạt Adaptive Query Execution (AQE), dynamic partition coalescing, cấu hình bộ nhớ chống tràn ổ đĩa (Spill-to-Disk) và kiểm soát kích thước file (`maxRecordsPerFile`).
+* **🛡️ Data Contracts & Circuit Breaker (ST04):** Kiểm tra hợp đồng dữ liệu thời gian thực với **Pandera PySpark**:
+  - `CRITICAL`: Dừng pipeline ngay lập tức nếu dữ liệu sai khóa chính / null bất thường.
+  - `WARNING`: Tách và cách ly bản ghi lỗi vào **Dead Letter Queue (DLQ)** trên MinIO, cho phép pipeline tiếp tục xử lý bản ghi sạch.
+* **🧹 Delta Storage Maintenance (ST05):** Scheduled flow tự động thực hiện **`OPTIMIZE` (Z-ORDER)** sắp xếp đa chiều và **`VACUUM`** dọn snapshot cũ (> 7 ngày) chống phình to metadata.
+* **🔒 PII Protection & GDPR Crypto-Shredding (ST03):** Vectorized Spark UDF mã hóa định danh khách hàng bằng **AES-256-GCM**. Hỗ trợ hủy dữ liệu ("Right to be Forgotten") chỉ bằng thao tác thu hồi Key trong KMS.
+* **📊 Observability & Fast Alerting (ST06):** Hệ thống log định dạng chuẩn JSON cho mọi tác vụ kèm `run_id`, bảng, số dòng và webhook tự động gửi cảnh báo khi pipeline thất bại.
+* **✅ Quality Gates (ST07):** Quy chuẩn linting tĩnh siêu tốc với **Ruff** và bộ test tự động **Pytest**.
 
 ---
 
-## 3. Cấu trúc thư mục
+## 3. Tech Stack
 
-```
+| Thành phần | Công nghệ | Phiên bản | Vai trò kỹ thuật |
+| :--- | :--- | :---: | :--- |
+| **Orchestrator** | Prefect Server | 2.20.25 | Điều phối Flow/Task, tracking lịch sử và trạng thái |
+| **Compute Engine** | Apache Spark (PySpark) | 3.5.1 | Xử lý dữ liệu phân tán lớn (AQE + Memory Tuned) |
+| **Storage Format** | Delta Lake | 3.1.0 | ACID Transactions, Time-travel, Z-Order Compaction |
+| **Object Storage** | MinIO | latest | S3-compatible Lakehouse (Bronze + Quarantine DLQ) |
+| **Database / DWH** | PostgreSQL | 14-alpine | Lưu trữ Staging Dimensional Tables (Schema: `stg`) |
+| **Data Contract** | Pandera (PySpark) | 0.19.2 | Ràng buộc Schema, Rule validation và DLQ routing |
+| **Linter / Formatter** | Ruff | 0.6.9 | Kiểm tra chuẩn code Python, fix lỗi cú pháp tự động |
+| **Testing** | Pytest | 8.2.2 | Unit testing cho Contract, Config và Delta helpers |
+
+---
+
+## 4. Cấu trúc Thư mục Dự án
+
+```text
 DataOps_pipeline_HomeCredit/
 ├── cli/
+│   ├── data_contract/
+│   │   └── application_contract.py     # Pandera Data Contracts (CRITICAL vs WARNING)
 │   ├── flows/
 │   │   ├── config/
-│   │   │   └── homecredit_config.yaml      # Pipeline config (tables, paths, runtime)
+│   │   │   └── homecredit_config.yaml  # Config bảng, Z-Order keys, retention
 │   │   ├── serving/
-│   │   │   ├── bronze_flow.py              # Bronze ingestion: CSV → Delta Lake
-│   │   │   ├── silver_flow.py              # Silver transform: Delta → PostgreSQL
-│   │   │   ├── daily_pipeline.py           # Master flow: gọi Bronze + Silver
-│   │   │   └── metadata.py                 # Config loader helpers
-│   │   └── sql/staging/                    # 10 SQL transformation files
+│   │   │   ├── bronze_flow.py          # Bronze Ingest: CSV → Delta (MinIO)
+│   │   │   ├── silver_flow.py          # Silver Transform: Delta → PostgreSQL
+│   │   │   ├── dq_validator.py         # Data Quality Gate & DLQ Router
+│   │   │   ├── maintenance_flow.py     # Delta OPTIMIZE & VACUUM Maintenance
+│   │   │   ├── daily_pipeline.py       # Master Orchestrator + Webhook Alert
+│   │   │   └── metadata.py             # Config & Path Helper
+│   │   └── sql/staging/                # 10 file SQL Dimensional Modeling (Kimball)
 │   ├── ingestion/
-│   │   └── source_data/                    # ← đặt CSV files tại đây
-│   └── main.py                             # Entrypoint
+│   │   └── source_data/                # Thư mục chứa CSV gốc (application.csv,...)
+│   └── main.py                         # CLI Entrypoint chính
 ├── platforms/
 │   ├── config/
-│   │   └── stack.yaml                      # Spark + MinIO config
+│   │   └── delta_utils.py              # Generic Delta Read/Write, Compaction, Vacuum
 │   ├── processing/
-│   │   ├── spark_stack/spark_session.py    # SparkSession factory
-│   │   └── config/delta_utils.py           # Delta write helpers
-│   └── prefect_orchestra/prefect_main.py   # PrefectETLPipelineConfig
+│   │   └── spark_stack/spark_session.py# Spark Session Factory (AQE + S3A LogStore)
+│   └── security/
+│       └── pii_encryptor.py            # Vectorized AES-256-GCM Encryption Engine
 ├── log/
-│   ├── config/logger_config.yaml           # Logger routing config
-│   └── log_storage/                        # Runtime log files
+│   └── config/logger_setup.py          # Structured JSON Logger Singleton
 ├── infra_homecredit/
-│   ├── docker-compose.yml                  # Toàn bộ stack: 5 services
-│   └── Dockerfile                          # Pipeline image (Python 3.11 + Java 17)
-├── config.py                               # Single source of truth — paths + YAML loader
-├── .env.example                            # Template env vars
-└── requirements.txt                        # Python dependencies
+│   ├── docker-compose.yml              # Cụm 5 containers: Postgres, MinIO, Prefect, Pipeline
+│   └── Dockerfile                      # Image pipeline (Python 3.11 + OpenJDK 17)
+├── tests/
+│   ├── test_config.py                  # Unit test cấu trúc file cấu hình YAML
+│   ├── test_contract.py                # Unit test Pandera Data Contract rules
+│   ├── test_delta_utils.py             # Unit test Delta path generator
+│   └── test_pii.py                     # Unit test AES-256-GCM & Crypto-Shredding
+├── pyproject.toml                      # Cấu hình Ruff và Pytest
+├── requirements.txt                    # Danh sách dependencies đã khóa version
+├── config.py                           # Central project path locator
+└── README.md
 ```
 
 ---
 
-## 4. Yêu cầu môi trường
+## 5. Chuẩn Bị Dữ Liệu & Môi Trường
 
-### Phần mềm bắt buộc
-
-| Phần mềm | Phiên bản tối thiểu | Kiểm tra |
-|---|---|---|
-| Docker Desktop | 24.x+ | `docker --version` |
-| Docker Compose | 2.x+ (plugin) | `docker compose version` |
-| Git | 2.x+ | `git --version` |
-
-> **RAM khuyến nghị:** tối thiểu 8 GB (Spark cần 3 GB, MinIO + PostgreSQL + Prefect ~2 GB)
-
-### Dữ liệu nguồn — CSV files (tải từ Kaggle)
-
-Dataset: [Home Credit Default Risk](https://www.kaggle.com/c/home-credit-default-risk/data)
-
-Tải về và đặt vào thư mục `cli/ingestion/source_data/`:
-
-```
+### 1. Dữ liệu nguồn (Kaggle Dataset)
+Tải bộ dữ liệu [Home Credit Default Risk](https://www.kaggle.com/c/home-credit-default-risk/data) và đặt các file CSV vào thư mục:
+```text
 cli/ingestion/source_data/
-├── application.csv               (~307K rows)
-├── bureau.csv                    (~1.7M rows)
-├── bureau_balance.csv            (~27M rows)
-├── previous_application.csv      (~1.7M rows)
-├── installments_payments.csv     (~13.6M rows)
-├── POS_CASH_balance.csv          (~10M rows)
-└── credit_card_balance.csv       (~3.8M rows)
+├── application.csv              (~307K rows)
+├── bureau.csv                   (~1.7M rows)
+├── bureau_balance.csv           (~27M rows)
+├── previous_application.csv     (~1.7M rows)
+├── installments_payments.csv    (~13.6M rows)
+├── POS_CASH_balance.csv         (~10M rows)
+└── credit_card_balance.csv      (~3.8M rows)
 ```
 
----
-
-## 5. Cài đặt & Cấu hình
-
-### Bước 1 — Clone repository
-
-```bash
-git clone https://github.com/HungphamLeo/DataOps_pipeline_HomeCredit.git
-cd DataOps_pipeline_HomeCredit
-```
-
-### Bước 2 — Tạo file `.env`
-
+### 2. Thiết lập Biến môi trường
 ```bash
 cp .env.example .env
 ```
 
-Mở `.env` và chỉnh các giá trị sau (phần còn lại giữ default là được):
+---
 
-```dotenv
-# PostgreSQL
-POSTGRES_USER=admin_homecredit
-POSTGRES_PASSWORD=your_secure_password
-POSTGRES_DB=homecredit_mart
+## 6. Hướng Dẫn Khởi Chạy (Docker & WSL)
 
-# MinIO
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=your_secure_password
-MINIO_BUCKET=lakehouse
-
-# Spark (tuỳ RAM máy)
-SPARK_DRIVER_MEMORY=3g        # Nếu máy < 8GB RAM: dùng 2g
-SPARK_SHUFFLE_PARTITIONS=8
-```
-
-### Bước 3 — Đặt CSV files vào đúng thư mục
+### Cách 1: Chạy Full Pipeline bằng Docker Compose (Khuyến nghị)
 
 ```bash
-# Linux/macOS
-cp ~/Downloads/home-credit-default-risk/*.csv cli/ingestion/source_data/
+cd infra_homecredit
 
-# Windows (PowerShell)
-Copy-Item "$HOME\Downloads\home-credit-default-risk\*.csv" "cli\ingestion\source_data\"
+# 1. Khởi động hạ tầng nền (Postgres, MinIO, Prefect Server)
+docker compose up -d postgres minio minio-init prefect-server
+
+# 2. Build image và thực thi Master Pipeline Flow
+docker compose run --rm pipeline python -m cli.main
+```
+
+### Cách 2: Chạy trực tiếp trên máy cục bộ / WSL (Dev Mode)
+
+```bash
+# 1. Kích hoạt virtualenv (Python 3.11) và cài đặt dependencies
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Khởi chạy full pipeline
+python -m cli.main
 ```
 
 ---
 
-## 6. Chạy pipeline
+## 7. Kiểm Thử & Đảm Bảo Chất Lượng (Quality Gates)
 
-### Lần đầu — Build image và khởi động toàn bộ stack
-
-```bash
-# Từ thư mục gốc của project
-docker compose -f infra_homecredit/docker-compose.yml up --build -d
-```
-
-Lệnh này sẽ:
-1. Build Docker image pipeline (Python 3.11 + Java 17 + tất cả dependencies)
-2. Khởi động PostgreSQL, MinIO, Prefect Server, Prefect Worker
-3. Chờ healthcheck các service
-4. Tạo bucket `lakehouse` trên MinIO
-5. Chạy pipeline container
-
-> ⏱️ Lần đầu build có thể mất **5–15 phút** do tải Spark JAR packages (~500MB).
-
-### Chạy lại pipeline (không build lại image)
+Trước khi commit hoặc push code, thực thi bộ kiểm tra chất lượng tự động:
 
 ```bash
-docker compose -f infra_homecredit/docker-compose.yml up pipeline
-```
+# 1. Kiểm tra và tự động fix chuẩn cú pháp bằng Ruff
+ruff check --fix .
+ruff format .
 
-### Chỉ khởi động infrastructure (không chạy pipeline)
-
-```bash
-docker compose -f infra_homecredit/docker-compose.yml up -d postgres minio minio-init prefect-server prefect-worker
-```
-
-### Dừng toàn bộ stack
-
-```bash
-docker compose -f infra_homecredit/docker-compose.yml down
-```
-
-### Dừng và xóa toàn bộ data (reset hoàn toàn)
-
-```bash
-docker compose -f infra_homecredit/docker-compose.yml down -v
+# 2. Chạy toàn bộ Unit & Data Contract Tests
+pytest tests/ -v
 ```
 
 ---
 
-## 7. Theo dõi & Kiểm tra kết quả
+## 8. Vận Hành & Bảo Trì Delta Lake
 
-### Theo dõi log pipeline realtime
-
-```bash
-docker logs homecredit_pipeline --follow
-```
-
-### Các checkpoint xác nhận pipeline chạy thành công
-
-```
-✅ prefect_configuration_loaded
-✅ pipeline_config_loaded
-✅ spark_session_ready        app=homecredit-bronze-silver
-✅ bronze_load_completed      table=application   rows=307511
-✅ bronze_load_completed      table=bureau
-✅ bronze_load_completed      table=bureau_balance
-✅ bronze_load_completed      table=previous_application
-✅ bronze_load_completed      table=installments_payments
-✅ bronze_load_completed      table=pos_cash_balance
-✅ bronze_load_completed      table=credit_card_balance
-✅ bronze_flow_completed      tables=7
-✅ silver_schema_ready        schema=stg
-✅ silver_flow_completed      tables=10
-✅ master_pipeline_completed  duration_seconds=...
-```
-
-### Truy cập các UI
-
-| Service | URL | Credentials |
-|---|---|---|
-| **Prefect UI** | http://localhost:4201 | — |
-| **MinIO Console** | http://localhost:9003 | minioadmin / (từ .env) |
-| **PostgreSQL** | localhost:5433 | admin_homecredit / (từ .env) |
-
-### Kiểm tra data trong PostgreSQL
-
-```sql
--- Kết nối: host=localhost port=5433 db=homecredit_mart user=admin_homecredit
-
--- Xem tất cả bảng đã tạo trong schema stg
-SELECT table_name FROM information_schema.tables
-WHERE table_schema = 'stg'
-ORDER BY table_name;
-
--- Kiểm tra số row từng bảng
-SELECT 'Dim_Customer'       AS tbl, COUNT(*) FROM stg."Dim_Customer"       UNION ALL
-SELECT 'Dim_Date'           AS tbl, COUNT(*) FROM stg."Dim_Date"           UNION ALL
-SELECT 'Fact_Loan_Application', COUNT(*) FROM stg."Fact_Loan_Application"  UNION ALL
-SELECT 'Fact_Loan_Repayment',   COUNT(*) FROM stg."Fact_Loan_Repayment";
-```
-
-### Kiểm tra Bronze data trong MinIO
-
-Mở MinIO Console tại http://localhost:9003, truy cập bucket `lakehouse/bronze/`.
-Mỗi bảng sẽ có thư mục Delta với cấu trúc:
-
-```
-lakehouse/bronze/
-├── application/
-│   ├── _delta_log/
-│   └── _load_date=2026-09-24/
-│         └── part-00000.parquet
-├── bureau/
-├── bureau_balance/
-└── ...
-```
-
----
-
-## 8. Luồng dữ liệu chi tiết
-
-### Bronze Layer — CSV → Delta Lake
-
-| Source file | Bronze table | ~Rows |
-|---|---|---|
-| `application.csv` | `bronze/application` | 307,511 |
-| `bureau.csv` | `bronze/bureau` | 1,716,428 |
-| `bureau_balance.csv` | `bronze/bureau_balance` | 27,299,925 |
-| `previous_application.csv` | `bronze/previous_application` | 1,670,214 |
-| `installments_payments.csv` | `bronze/installments_payments` | 13,605,401 |
-| `POS_CASH_balance.csv` | `bronze/pos_cash_balance` | 10,001,358 |
-| `credit_card_balance.csv` | `bronze/credit_card_balance` | 3,840,312 |
-
-### Silver Layer — Delta Lake → PostgreSQL (schema: stg)
-
-**Dimensions (build trước):**
-
-| Target table | SQL file | Source Bronze views |
-|---|---|---|
-| `Dim_Date` | `dim_date.sql` | generated |
-| `Dim_Application_Status` | `dim_application_status.sql` | bronze_previous_application |
-| `Dim_Contract_Type` | `dim_contract_type.sql` | bronze_application |
-| `Dim_Customer` | `dim_customer.sql` | bronze_application |
-
-**Facts (build sau dims):**
-
-| Target table | SQL file | Source Bronze views |
-|---|---|---|
-| `Fact_Loan_Application` | `fact_loan_application.sql` | bronze_application, bronze_previous_application |
-| `Fact_Loan_Repayment` | `fact_loan_repayment.sql` | bronze_installments_payments, bronze_previous_application |
-| `Fact_Bureau_Credit` | `fact_bureau_credit.sql` | bronze_bureau |
-| `Fact_Bureau_Monthly_Snapshot` | `fact_bureau_monthly_snapshot.sql` | bronze_bureau_balance |
-| `Fact_Credit_Balance` | `fact_credit_balance.sql` | bronze_credit_card_balance |
-| `Fact_POS_CASH_Balance` | `fact_pos_cash_balance.sql` | bronze_pos_cash_balance |
-
----
-
-## 9. Tuning & Vận hành
-
-### Điều chỉnh Spark memory theo RAM máy
-
-Chỉnh trong `.env` trước khi chạy:
-
-| RAM máy | `SPARK_DRIVER_MEMORY` | `SPARK_SHUFFLE_PARTITIONS` |
-|---|---|---|
-| < 8 GB | `2g` | `4` |
-| 8–16 GB | `3g` | `8` |
-| > 16 GB | `4g` | `16` |
-
-### Rebuild image sau khi thay đổi code
+Để giải quyết tình trạng **Small Files** và giải phóng dung lượng snapshot cũ, kích hoạt Flow bảo trì định kỳ:
 
 ```bash
-docker compose -f infra_homecredit/docker-compose.yml build --no-cache pipeline
-docker compose -f infra_homecredit/docker-compose.yml up pipeline
+# Chạy OPTIMIZE (Z-ORDER theo khóa chính) và VACUUM (xóa snapshot > 168 giờ)
+docker compose run --rm pipeline python -c "from cli.flows.serving.maintenance_flow import delta_maintenance_flow; delta_maintenance_flow()"
 ```
 
-### Chạy lại chỉ Bronze (nếu Silver fail)
-
-```bash
-# Vào container và chạy trực tiếp
-docker compose -f infra_homecredit/docker-compose.yml run --rm pipeline \
-  python -c "from cli.flows.serving.bronze_flow import bronze_ingest_flow; bronze_ingest_flow()"
-```
+### Dashboard & Cổng Quản Trị
+* **Prefect UI:** [http://localhost:4201](http://localhost:4201) (Theo dõi trạng thái và thời gian chạy của Flow/Task)
+* **MinIO Console:** [http://localhost:9003](http://localhost:9003) (User: `minioadmin` / Pass: `change_me`)
+* **PostgreSQL:** `localhost:5433` (DB: `homecredit_mart`, Schema: `stg`)
 
 ---
 
-## 10. Troubleshooting
+## 9. Xử Lý Sự Cố Thường Gặp (Troubleshooting)
 
-| Lỗi | Nguyên nhân | Fix |
-|---|---|---|
-| `Package openjdk-17-jre-headless is not available` | Docker Hub re-tag base image sang Debian Trixie | Dockerfile đã pin `python:3.11.13-slim-bookworm` — rebuild `--no-cache` |
-| `FileNotFoundError: stack.yaml` | File chưa được COPY vào image | Rebuild `--no-cache`, kiểm tra `.dockerignore` |
-| `Can't instantiate abstract class GatherTaskGroup` | anyio version sai | `requirements.txt` đã pin `anyio==4.4.0` — rebuild image |
-| `ModuleNotFoundError: No module named 'cli'` | Thiếu `__init__.py` | Đã tạo đủ `__init__.py` trong `cli/`, `platforms/`, `log/` |
-| Container OOM khi chạy `bureau_balance` | Spark dùng hết RAM | Giảm `SPARK_DRIVER_MEMORY=2g` trong `.env` |
-| `MetricsConfig: Cannot locate hadoop-metrics2` | Hadoop metrics config không tồn tại | **Bỏ qua** — WARN vô hại |
-| PostgreSQL healthcheck fail | DB chưa sẵn sàng | Pipeline có `depends_on: condition: service_healthy` — tự chờ |
-
----
-
-## Branch hiện tại
-
-```
-23092026_hung_debug_prefect_and_config
-```
-
-Xem lịch sử thay đổi chi tiết trong thư mục [`export_task/`](export_task/).
+| Lỗi / Hiện tượng | Nguyên nhân | Cách khắc phục |
+| :--- | :--- | :--- |
+| `AttributeError: np.string_ was removed in NumPy 2.0` | Pandera 0.19.2 không tương thích NumPy 2.x | Khóa version `numpy==1.26.4` trong `requirements.txt`. |
+| `TimeoutError trong asgi_lifespan` | Prefect Client không kết nối được Server và bị treo khi khởi tạo SQLite | Đảm bảo biến `PREFECT_API_URL=http://prefect-server:4200/api` trong `docker-compose.yml`. |
+| `DataQualityError: CRITICAL contract violated` | Dữ liệu đầu vào vi phạm tính toàn vẹn (Null PK, Target sai dải giá trị) | Pipeline tự động ngắt bảo vệ Data Lake (Circuit Breaker). Kiểm tra log chi tiết để xác định dòng lỗi. |
+| Spark OOM / JVM Heap Crash khi chạy `bureau_balance` | Dữ liệu lớn (~27M rows) bị dồn bộ nhớ khi shuffle | Tăng `SPARK_DRIVER_MEMORY` trong `.env` hoặc giảm `max_records_per_file` xuống `200000`. |
