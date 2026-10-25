@@ -1,4 +1,4 @@
-version: "3.9"
+version: "3.9.7"
 
 services:
   # ─── PostgreSQL ─────────────────────────────────────────────────────────────
@@ -16,8 +16,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
+      interval: 20s
+      timeout: 30s
       retries: 5
     networks:
       - homecredit-net
@@ -38,8 +38,8 @@ services:
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 10s
-      timeout: 5s
+      interval: 20s
+      timeout: 30s
       retries: 5
     networks:
       - homecredit-net
@@ -68,9 +68,14 @@ services:
     container_name: homecredit_prefect_server
     restart: unless-stopped
     environment:
-      PREFECT_API_URL: http://prefect-server:4200/api
-      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_URL: "http://prefect-server:4200/api"
+      PREFECT_SERVER_API_HOST: "0.0.0.0"
       PREFECT_API_DATABASE_CONNECTION_URL: "postgresql+asyncpg://${POSTGRES_USER:-admin_homecredit}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-homecredit_mart}"
+      PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS: "90"
+      PREFECT_API_SERVICES_LATE_RUNS_ENABLED: "false"
+      PREFECT_API_SERVICES_SCHEDULER_ENABLED: "false"
+      PREFECT_API_SERVICES_FLOW_RUN_NOTIFICATIONS_ENABLED: "false"
+      PREFECT_API_SERVICES_PAUSE_EXPIRATIONS_ENABLED: "false"
     command: prefect server start --host 0.0.0.0 --port 4200
     ports:
       - "4201:4200"
@@ -129,6 +134,8 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      prefect-server:
+        condition: service_started
     command: ["python", "-m", "cli.main"]
     networks:
       - homecredit-net

@@ -21,7 +21,8 @@ import io
 import logging
 from pathlib import Path
 from typing import List, Optional
-
+from minio import Minio
+from minio.error import S3Error
 from platforms.storage.base_storage import IObjectStorage
 from log.config.logger_setup import logger_manager
 
@@ -53,7 +54,7 @@ class MinioStorageBackend(IObjectStorage):
         """
         self.logger = logger or logger_manager.get_logger(__name__)
         try:
-            from minio import Minio
+            
             self._client = Minio(
                 endpoint,
                 access_key=access_key,
@@ -143,7 +144,7 @@ class MinioStorageBackend(IObjectStorage):
 
     def object_exists(self, bucket: str, key: str) -> bool:
         """Return True if the object exists in the bucket."""
-        from minio.error import S3Error
+
 
         try:
             self._client.stat_object(bucket, key)

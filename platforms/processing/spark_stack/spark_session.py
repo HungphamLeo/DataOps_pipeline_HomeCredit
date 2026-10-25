@@ -52,7 +52,7 @@ def get_spark_session(config: dict) -> SparkSession:
         # sql.shuffle.partitions nhỏ hơn default(200) để mỗi partition fit RAM.
         # maxRecordsPerFile giới hạn kích thước mỗi Parquet part file → tránh OOM khi write.
         shuffle_partitions = str(spark_cfg.get("shuffle_partitions", 8))
-        max_records = str(spark_cfg.get("max_records_per_file", 500_000))
+        max_records = str(spark_cfg.get("max_records_per_file", 300000))
 
         builder = (
             SparkSession.builder
@@ -87,6 +87,11 @@ def get_spark_session(config: dict) -> SparkSession:
             .config("spark.sql.files.maxRecordsPerFile", max_records)
             .config("spark.sql.adaptive.enabled", "true")
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "134217728") # 128MB per partition
+            .config("spark.sql.autoBroadcastJoinThreshold", "67108864") # 64MB cho Dimension Join
+            # --- Delta Auto-Optimize (Chống Small Files) ---
+            .config("spark.databricks.delta.optimizeWrite.enabled", "true")
+            .config("spark.databricks.delta.autoCompact.enabled", "true")
             # Spill to disk thay vì OOM khi memory pressure cao
             .config("spark.memory.fraction", "0.6")
             .config("spark.memory.storageFraction", "0.3")

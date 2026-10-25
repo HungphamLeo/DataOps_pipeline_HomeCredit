@@ -21,7 +21,7 @@ from pyspark.sql import SparkSession, functions as F
 
 from cli.flows.serving.metadata import load_config, load_stack_config
 from platforms.prefect_orchestra.prefect_main import PrefectETLPipelineConfig
-from platforms.processing.config.delta_utils import write_jdbc
+from platforms.config.delta_utils import write_jdbc
 from platforms.processing.spark_stack.spark_session import get_spark_session
 
 _pipeline_cfg = PrefectETLPipelineConfig()

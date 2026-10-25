@@ -13,8 +13,10 @@ SELECT
     )))                                                                         AS Bureau_Snapshot_SK,
 
     -- FK → Dim_Date (tháng báo cáo — cuối tháng)
+        -- FK → Dim_Date (tháng báo cáo — cuối tháng)
+    -- Thay current_date() bằng mốc anchor date hoặc snapshot date xác định
     COALESCE(
-        CAST(date_format(last_day(add_months(current_date(), CAST(MONTHS_BALANCE AS INT))), 'yyyyMMdd') AS INT),
+        CAST(date_format(last_day(add_months(CAST('2018-05-01' AS DATE), CAST(MONTHS_BALANCE AS INT))), 'yyyyMMdd') AS INT),
         -1
     )                                                                           AS Month_Date_SK,
 
